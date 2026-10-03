@@ -4,8 +4,9 @@ api:
   vision_model: deepseek-v4-flash-vision
   fallback_model: deepseek-v4-pro-0813
   key_env: INTERN_AI_API_KEY
-  timeout_seconds: 60
+  timeout_seconds: 180
   first_answer_timeout_seconds: 15
+  primary_completion_timeout_seconds: 60
   stream: true
   thinking: disabled
 leetcode:

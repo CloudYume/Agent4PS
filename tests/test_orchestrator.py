@@ -133,6 +133,28 @@ def test_first_attempt_skips_remote_review_in_fast_mode(tmp_path):
     assert model.reviews == 0
 
 
+def test_code_only_candidate_receives_review_before_browser_run(tmp_path):
+    class CountingModel(FakeModel):
+        def __init__(self):
+            super().__init__()
+            self.reviews = 0
+
+        def solve(self, problem):
+            return Candidate(CANDIDATE.code, "summary", "approach", "未评估", "未评估")
+
+        def review(self, problem, candidate):
+            self.reviews += 1
+            return True, []
+
+    model = CountingModel()
+    agent, _ = make_agent(
+        tmp_path, FakeBrowser([CheckResult(True, "run passed")], [CheckResult(True, "accepted")]),
+        model, FakeSearch(),
+    )
+    agent.run_one()
+    assert model.reviews == 1
+
+
 def test_saved_local_failure_rechecks_before_requesting_repair(tmp_path):
     browser = FakeBrowser([CheckResult(True, "run passed")], [CheckResult(True, "accepted")])
     class TrackingModel(FakeModel):

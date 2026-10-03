@@ -34,6 +34,10 @@ class _NoAnswerTimeout(Exception):
     pass
 
 
+class _PrimaryCompletionTimeout(Exception):
+    pass
+
+
 class _UnchangedRepair(ModelUnavailable):
     pass
 
@@ -69,8 +73,10 @@ def _json_object(content: str) -> dict:
         start = cleaned.find("{")
         if start < 0:
             raise json.JSONDecodeError("no JSON object", cleaned, 0)
+        if cleaned[:start].lstrip().startswith("["):
+            raise json.JSONDecodeError("expected one JSON object", cleaned, 0)
         value, end = json.JSONDecoder(strict=False).raw_decode(cleaned, start)
-        if cleaned[end:].strip().startswith("{"):
+        if "{" in cleaned[end:]:
             raise json.JSONDecodeError("multiple JSON objects", cleaned, end)
     except json.JSONDecodeError as exc:
         raise ModelUnavailable(
@@ -247,6 +253,15 @@ class ModelClient:
                     + min(1, self.config.timeout_seconds / 10))
                 else None
             )
+            primary_completion_budget = (
+                self.config.primary_completion_timeout_seconds
+                if (model_override is None and not using_fallback and self.config.fallback_model
+                    and self.config.primary_completion_timeout_seconds is not None
+                    and self.calls < self.max_calls and retry < 2
+                    and remaining > self.config.primary_completion_timeout_seconds
+                    + min(1, self.config.timeout_seconds / 10))
+                else None
+            )
 
             def first_output() -> None:
                 self.on_retry(
@@ -286,15 +301,26 @@ class ModelClient:
                             return False, content, finish_reason, status
 
                 async with asyncio.timeout(remaining):
-                    if first_answer_budget is None:
-                        return await request(None)
+                    async def with_first_answer_limit() -> tuple[bool, str, str | None, int]:
+                        if first_answer_budget is None:
+                            return await request(None)
+                        try:
+                            async with asyncio.timeout(first_answer_budget) as first_answer_timeout:
+                                return await request(first_answer_timeout)
+                        except TimeoutError as exc:
+                            if not first_answer_timeout.expired():
+                                raise
+                            raise _NoAnswerTimeout from exc
+
+                    if primary_completion_budget is None:
+                        return await with_first_answer_limit()
                     try:
-                        async with asyncio.timeout(first_answer_budget) as first_answer_timeout:
-                            return await request(first_answer_timeout)
+                        async with asyncio.timeout(primary_completion_budget) as primary_completion_timeout:
+                            return await with_first_answer_limit()
                     except TimeoutError as exc:
-                        if not first_answer_timeout.expired():
+                        if not primary_completion_timeout.expired():
                             raise
-                        raise _NoAnswerTimeout from exc
+                        raise _PrimaryCompletionTimeout from exc
 
             try:
                 retry_status, content, finish_reason, status = asyncio.run(receive())
@@ -324,6 +350,14 @@ class ModelClient:
             except _NoAnswerTimeout:
                 self.on_retry(
                     f"Model API request {self.calls}: no answer content after "
+                    f"{time.monotonic() - started:.1f}s; switching to fallback model "
+                    f"{self.config.fallback_model}"
+                )
+                using_fallback = True
+                continue
+            except _PrimaryCompletionTimeout:
+                self.on_retry(
+                    f"Model API request {self.calls}: no complete answer after "
                     f"{time.monotonic() - started:.1f}s; switching to fallback model "
                     f"{self.config.fallback_model}"
                 )

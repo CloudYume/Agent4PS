@@ -183,9 +183,9 @@ Remove-Variable secret
 | 配置项 | 当前值 | 作用 |
 | --- | --- | --- |
 | `api.endpoint` | `https://discovery-api.intern-ai.org.cn/v1/chat/completions` | Chat Completions 接口 |
-| `api.model` / `api.fallback_model` | `deepseek-v4-flash-0731` / `deepseek-v4-pro-0813` | 主模型；无答案正文或修复候选被拒绝时使用备用模型 |
+| `api.model` / `api.fallback_model` | `deepseek-v4-flash-0731` / `deepseek-v4-pro-0813` | 主模型；无答案正文、返回格式不合要求或修复候选被拒绝时使用备用模型 |
 | `api.vision_model` | `deepseek-v4-flash-vision` | 读取题面图片并生成图意；服务需能访问公开图片 URL |
-| `api.first_answer_timeout_seconds` / `api.timeout_seconds` | `15` / `60` | 首次正文等待时间；单次模型调用流程的总时限 |
+| `api.first_answer_timeout_seconds` / `api.primary_completion_timeout_seconds` / `api.timeout_seconds` | `15` / `60` / `180` | 首次正文、主模型完成期限与整次调用总时限；主模型超时后备用模型使用剩余预算 |
 | `api.stream` / `api.thinking` | `true` / `disabled` | 流式接收；请求非思考模式，网关仍可能输出推理流 |
 | `browser.host` / `browser.port` | `127.0.0.1` / `8765` | 本机桥接地址；端口须与扩展弹窗一致 |
 | `browser.poll_interval_seconds` | `0.5` | 扩展领取命令的轮询间隔 |
@@ -195,7 +195,7 @@ Remove-Variable secret
 | `search.fallback_after_failures` / `search.max_pages` | `2` / `3` | 公开题解搜索门槛与读取页数 |
 | `output.save_artifacts` | `false` | 暂停每题题解文件；进度与历史仍保存 |
 
-模型流只有在收到完整结束信号后才会被使用；中途断流、HTTP 429/5xx 和连接故障按预算重试。收到回答正文后不会因为首字节计时器切换模型。API 故障、登录失效、验证码或无法确认的站内结果会停止当前运行，并保留可恢复进度。
+模型流只有在收到完整结束信号后才会被使用；中途断流、HTTP 429/5xx 和连接故障按预算重试。收到回答正文后不会因 15 秒首答计时器切换模型；若主模型在 60 秒内仍未完成，则丢弃半截输出并把剩余时间交给备用模型。总时限仍到期或 API 故障、登录失效、验证码、站内结果不明确时会停止当前运行，并保留可恢复进度。
 
 ## 故障排查
 
@@ -206,6 +206,7 @@ Remove-Variable secret
 | 协议版本不匹配 | 在 `edge://extensions` 重新加载 Agent4PS，再刷新题目标签；Python 运行器也需重启。 |
 | `LeetCode GraphQL HTTP 400` | 刷新题目页并核对登录状态；若仍出现，检查站点页面/API 变化及扩展日志。进度不会因此跳题。 |
 | 模型长时间无正文或超时 | 检查 endpoint、模型 ID、密钥和服务状态；可调整 API 超时。超时后当前题号仍保留。 |
+| `model response was not a JSON object` | 程序会尝试解析单一 JSON 对象或有效的 `Solution` Python 代码；无法识别时用备用模型重试一次，仍失败则保留题号。 |
 | WA 后模型重复原逻辑 | 失败输入、实际输出和预期输出会随修复请求发送；相同逻辑或未通过回归用例的代码会被拒绝，并尝试备用模型。仍失败则停止，保留 `needs_repair`。 |
 | `submission_unconfirmed` | 先查看站内提交记录。重启会尝试只读恢复；仍不明确时，人工核对后使用 `resolve`，不要直接再次运行提交。 |
 | AC 后下一题加载超时 | 保持绑定标签活动并确认目标题页可打开；游标已在下一题，重启后会从该题继续。 |

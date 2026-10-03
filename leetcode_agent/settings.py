@@ -16,6 +16,7 @@ class ApiSettings(BaseModel):
     key_env: str = Field(pattern=r"^[A-Z][A-Z0-9_]*$")
     timeout_seconds: int = Field(ge=5, le=300)
     first_answer_timeout_seconds: int | None = Field(default=None, ge=5, le=300)
+    primary_completion_timeout_seconds: int | None = Field(default=None, ge=5, le=300)
     stream: bool = True
     thinking: Literal["enabled", "disabled"] | None = None
 
@@ -28,6 +29,13 @@ class ApiSettings(BaseModel):
                 raise ValueError("api.fallback_model must differ from api.model")
             if self.first_answer_timeout_seconds >= self.timeout_seconds:
                 raise ValueError("api.first_answer_timeout_seconds must be less than api.timeout_seconds")
+        if self.primary_completion_timeout_seconds is not None:
+            if self.fallback_model is None:
+                raise ValueError("api.primary_completion_timeout_seconds requires api.fallback_model")
+            if self.primary_completion_timeout_seconds >= self.timeout_seconds:
+                raise ValueError("api.primary_completion_timeout_seconds must be less than api.timeout_seconds")
+            if self.primary_completion_timeout_seconds <= self.first_answer_timeout_seconds:
+                raise ValueError("api.primary_completion_timeout_seconds must exceed api.first_answer_timeout_seconds")
         return self
 
 

@@ -164,7 +164,10 @@ class Orchestrator:
             self._report(problem.ref.number, "local", f"Problem {problem.ref.number}, attempt {attempt}: checking local cases", attempt)
             result = self._check_local(candidate, problem)
             checks.append(result)
-            if result.passed and (self.settings.workflow.review_mode == "always" or repair_number > 0):
+            needs_review = (self.settings.workflow.review_mode == "always" or repair_number > 0
+                            or (candidate.time_complexity == "未评估"
+                                and candidate.space_complexity == "未评估"))
+            if result.passed and needs_review:
                 self._report(problem.ref.number, "review", f"Problem {problem.ref.number}, attempt {attempt}: reviewing correctness and complexity", attempt)
                 prepare_for_model()
                 approved, issues = self.model.review(problem, candidate)

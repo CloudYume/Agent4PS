@@ -269,6 +269,41 @@ def test_first_answer_cancels_fallback_deadline(monkeypatch):
     assert models == [api.model]
 
 
+def test_partial_primary_answer_switches_to_fallback_before_total_deadline(monkeypatch):
+    settings = load_settings(Path(__file__).resolve().parents[1] / "config.yaml")
+    api = settings.api.model_copy(update={
+        "timeout_seconds": 0.5, "first_answer_timeout_seconds": 0.05,
+        "primary_completion_timeout_seconds": 0.1,
+    })
+    monkeypatch.setenv("INTERN_AI_API_KEY", "test-secret-marker")
+    original_client = httpx.AsyncClient
+    models = []
+    notes = []
+
+    class IncompleteStream(httpx.AsyncByteStream):
+        async def __aiter__(self):
+            yield b'data: {"choices":[{"delta":{"content":"partial"}}]}\n\n'
+            await asyncio.sleep(0.3)
+
+        async def aclose(self):
+            pass
+
+    def handle(request):
+        model = json.loads(request.content)["model"]
+        models.append(model)
+        if model == api.model:
+            return httpx.Response(200, headers={"content-type": "text/event-stream"}, stream=IncompleteStream())
+        return httpx.Response(200, json={"choices": [{"message": {"content": "OK"}}]})
+
+    monkeypatch.setattr(model_module.httpx, "AsyncClient", lambda **kwargs: original_client(
+        transport=httpx.MockTransport(handle), **kwargs,
+    ))
+    ModelClient(api, 2, on_retry=notes.append).ping()
+    assert models == [api.model, api.fallback_model]
+    assert any("no complete answer" in note and "switching to fallback" in note for note in notes)
+    assert not any("request 1: completed" in note for note in notes)
+
+
 def test_partial_answer_timeout_does_not_retry_with_fallback(monkeypatch):
     settings = load_settings(Path(__file__).resolve().parents[1] / "config.yaml")
     api = settings.api.model_copy(update={
@@ -365,6 +400,10 @@ def test_fallback_settings_require_distinct_model_and_shorter_deadline():
         api.model_validate({**api.model_dump(), "fallback_model": api.model})
     with pytest.raises(ValueError, match="must be less"):
         api.model_validate({**api.model_dump(), "first_answer_timeout_seconds": api.timeout_seconds})
+    with pytest.raises(ValueError, match="must be less"):
+        api.model_validate({**api.model_dump(), "primary_completion_timeout_seconds": api.timeout_seconds})
+    with pytest.raises(ValueError, match="must exceed"):
+        api.model_validate({**api.model_dump(), "primary_completion_timeout_seconds": api.first_answer_timeout_seconds})
 
 
 def test_repair_prompt_includes_complete_labeled_judge_feedback(monkeypatch):
@@ -678,6 +717,10 @@ def test_candidate_accepts_json_fence_and_literal_newline_in_code():
 def test_candidate_rejects_ambiguous_or_non_solution_response():
     with pytest.raises(ModelUnavailable, match="not a JSON object"):
         ModelClient._candidate('{"code": "class Solution: pass"} {"code": "class Solution: pass"}')
+    with pytest.raises(ModelUnavailable, match="not a JSON object"):
+        ModelClient._candidate('{"code": "class Solution: pass"} text {"code": "class Solution: pass"}')
+    with pytest.raises(ModelUnavailable, match="not a JSON object"):
+        ModelClient._candidate('[{"code": "class Solution: pass"}]')
     with pytest.raises(ModelUnavailable, match="not a JSON object"):
         ModelClient._candidate("Here is an explanation without executable code.")
 

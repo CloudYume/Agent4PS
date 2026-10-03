@@ -1,0 +1,29 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Agent4PS</title>
+  <style>
+    body { width: 280px; margin: 0; padding: 16px; font: 13px/1.5 system-ui, sans-serif; color: #17212b; background: #fff; }
+    h1 { margin: 0 0 8px; font-size: 16px; }
+    #status { min-height: 40px; margin: 0 0 12px; color: #405363; }
+    form { display: flex; gap: 8px; }
+    input { width: 120px; padding: 7px; border: 1px solid #9baab5; border-radius: 4px; font: inherit; }
+    button { padding: 7px 10px; border: 0; border-radius: 4px; background: #087d68; color: white; font: inherit; cursor: pointer; }
+    button:disabled { opacity: .55; cursor: default; }
+    label { display: block; margin: 12px 0 4px; color: #405363; }
+  </style>
+</head>
+<body>
+  <h1>Agent4PS</h1>
+  <p id="status" role="status">正在检查连接...</p>
+  <form id="pair-form" hidden>
+    <input id="code" type="text" inputmode="numeric" pattern="[0-9]{6}" maxlength="6" placeholder="配对码" aria-label="配对码" required>
+    <button type="submit">连接</button>
+  </form>
+  <label for="port">本地端口</label>
+  <input id="port" type="number" min="1024" max="65535" value="8765">
+  <script src="popup.js"></script>
+</body>
+</html>

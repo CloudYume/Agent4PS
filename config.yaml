@@ -1,0 +1,32 @@
+api:
+  endpoint: https://discovery-api.intern-ai.org.cn/v1/chat/completions
+  model: deepseek-v4-flash-0731
+  vision_model: deepseek-v4-flash-vision
+  fallback_model: deepseek-v4-pro-0813
+  key_env: INTERN_AI_API_KEY
+  timeout_seconds: 60
+  first_answer_timeout_seconds: 15
+  stream: true
+  thinking: disabled
+leetcode:
+  base_url: https://leetcode.cn
+  language: python3
+  start_id: 1
+browser:
+  mode: edge_extension
+  host: 127.0.0.1
+  port: 8765
+  poll_interval_seconds: 0.5
+  submit_trigger: button
+  navigation_trigger: url
+workflow:
+  max_repairs: 3
+  max_model_calls: 10
+  auto_submit: true
+  review_mode: on_repair
+search:
+  provider: bing_html
+  fallback_after_failures: 2
+  max_pages: 3
+output:
+  save_artifacts: false

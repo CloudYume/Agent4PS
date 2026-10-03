@@ -1,0 +1,23 @@
+{
+  "manifest_version": 3,
+  "name": "Agent4PS Bridge",
+  "version": "0.2.0",
+  "description": "Connect the active LeetCode tab to the local Agent4PS runner.",
+  "permissions": ["storage", "tabs", "scripting"],
+  "host_permissions": ["https://leetcode.cn/*", "http://127.0.0.1/*"],
+  "background": {"service_worker": "background.js"},
+  "content_scripts": [
+    {
+      "matches": ["https://leetcode.cn/problems/*"],
+      "js": ["page-hook.js"],
+      "world": "MAIN",
+      "run_at": "document_start"
+    },
+    {
+      "matches": ["https://leetcode.cn/problems/*"],
+      "js": ["content.js"],
+      "run_at": "document_idle"
+    }
+  ],
+  "action": {"default_popup": "popup.html", "default_title": "Agent4PS"}
+}

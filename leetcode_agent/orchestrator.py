@@ -2,12 +2,14 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from dataclasses import replace
+from pathlib import Path
 
 from .judge_feedback import format_failure, with_judge_cases
 from .local_check import check_candidate, normalize_platform_node_classes
 from .progress import ArtifactStore, ProgressStore, _digest, record_ref
 from .settings import Settings
-from .types import Candidate, CheckResult, Problem, ProgressEvent, Reference, SiteUnavailable
+from .types import (AgentError, Candidate, CapturedSubmissionUnavailable, CheckResult, Problem,
+                    ProgressEvent, Reference, SiteUnavailable)
 
 
 class Orchestrator:
@@ -57,6 +59,7 @@ class Orchestrator:
             raise SiteUnavailable("submission result needs confirmation; use resolve accepted or resolve retry")
         self.browser.require_login()
         for _ in range(1000):
+            self._report(number, "select", f"Problem {number}: locating in algorithm catalog")
             ref = self.browser.find_problem(number)
             if ref is None:
                 if current.get("status") in {"candidate_ready", "run_verified", "needs_repair"}:
@@ -75,19 +78,39 @@ class Orchestrator:
                 continue
             if problem.site_status == "AC":
                 self._report(number, "skip", f"Problem {number}: already accepted on LeetCode; skipping")
-                if current.get("status") in {"candidate_ready", "run_verified", "needs_repair"}:
-                    folder = self.artifacts.reconcile_saved_acceptance(problem, current)
-                else:
-                    folder = self.artifacts.reconcile_legacy_acceptance(problem)
-                details = {"folder": str(folder)} if folder else {}
-                self.progress.advance(number, "already_accepted", **record_ref(ref),
-                                      reason="accepted on LeetCode; agent submission ID not confirmed",
-                                      **details)
+                self._record_existing_acceptance(problem, current)
                 number += 1
                 current = {}
                 continue
-            return self._solve(problem)
+            try:
+                return self._solve(problem)
+            except AgentError:
+                saved = self.progress.load()["records"].get(str(number), {})
+                if saved.get("status") not in {"submit_intent", "submission_unconfirmed"}:
+                    verify = getattr(self.browser, "next_page_after_manual_acceptance", None)
+                    if callable(verify):
+                        try:
+                            accepted = verify(problem)
+                        except SiteUnavailable:
+                            accepted = False
+                        if accepted:
+                            self._report(number, "skip", f"Problem {number}: manual Accepted confirmed; continuing")
+                            folder = self._record_existing_acceptance(problem, saved)
+                            return {"number": number, "status": "already_accepted",
+                                    "folder": str(folder) if folder else None}
+                raise
         raise SiteUnavailable("more than 1000 consecutive problems were skipped")
+
+    def _record_existing_acceptance(self, problem: Problem, saved: dict) -> Path | None:
+        if saved.get("status") in {"candidate_ready", "run_verified", "needs_repair"}:
+            folder = self.artifacts.reconcile_saved_acceptance(problem, saved)
+        else:
+            folder = self.artifacts.reconcile_legacy_acceptance(problem)
+        details = {"folder": str(folder)} if folder else {}
+        self.progress.advance(problem.ref.number, "already_accepted", **record_ref(problem.ref),
+                              reason="accepted on LeetCode; agent submission ID not confirmed",
+                              **details)
+        return folder
 
     def _solve(self, problem: Problem) -> dict:
         number = problem.ref.number
@@ -220,12 +243,14 @@ class Orchestrator:
                     self._report(problem.ref.number, "submit", f"Problem {problem.ref.number}, attempt {attempt}: submitting on LeetCode", attempt)
                     try:
                         receipt = self.browser.submit_code(baseline_id)
-                    except SiteUnavailable:
+                    except SiteUnavailable as exc:
                         self.artifacts.save(problem, candidate, "submission_unconfirmed", checks, references, attempt)
                         self._mark_current(
                             number, "submission_unconfirmed", **record_ref(problem.ref),
                             attempts=attempt, folder=str(folder), baseline_id=baseline_id,
                             code_sha256=_digest(candidate.code), question_id=problem.site_question_id,
+                            **({"submission_id": exc.submission_id, "submission_verified": False}
+                               if isinstance(exc, CapturedSubmissionUnavailable) else {}),
                         )
                         raise
                     self.artifacts.save(problem, candidate, "submission_unconfirmed", checks, references, attempt)

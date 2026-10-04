@@ -12,6 +12,20 @@ class SiteUnavailable(AgentError):
     """The site, login, challenge, or result state needs human attention."""
 
 
+class CapturedSubmissionUnavailable(SiteUnavailable):
+    """A submit ID was observed, but its code has not been verified."""
+
+    def __init__(self, message: str, submission_id: str):
+        super().__init__(message)
+        self.submission_id = submission_id
+
+
+def is_rate_limited(message: str) -> bool:
+    return any(marker in message.lower() for marker in (
+        "超出访问限制", "访问过于频繁", "请求过于频繁", "too many requests", "rate limit", "http 429",
+    ))
+
+
 class ModelUnavailable(AgentError):
     """The configured model could not produce a usable response."""
 

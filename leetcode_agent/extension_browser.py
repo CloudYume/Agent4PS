@@ -12,7 +12,8 @@ from bs4 import BeautifulSoup
 
 from .bridge import BrowserBridge
 from .catalog import ProblemCatalog
-from .types import CheckResult, JudgeFeedback, Problem, ProblemImage, ProblemRef, SiteUnavailable, SubmissionReceipt
+from .types import (CapturedSubmissionUnavailable, CheckResult, JudgeFeedback, Problem, ProblemImage,
+                    ProblemRef, SiteUnavailable, SubmissionReceipt, is_rate_limited)
 
 
 def _statement_with_images(content: str, base_url: str) -> tuple[str, tuple[ProblemImage, ...]]:
@@ -78,6 +79,19 @@ class ExtensionBrowser:
 
     def find_problem(self, number: int) -> ProblemRef | None:
         return self.catalog.find(number)
+
+    def navigate_after_rate_limit(self, number: int, slug: str) -> None:
+        next_ref = self.catalog.find(number + 1)
+        if next_ref is None:
+            raise SiteUnavailable(f"problem {number + 1} is unavailable in the catalog")
+        page = self.bridge.wait_for_page(timeout=5, require_active=False)
+        self._require_protocol(page)
+        meta = page["problem"]
+        if page["slug"] == next_ref.slug and meta.get("number") == next_ref.number:
+            return
+        if page["slug"] != slug or meta.get("number") != number:
+            raise SiteUnavailable("bound Edge tab is no longer on the pending problem")
+        self.bridge.call("navigate", slug, {"url": next_ref.url, "trigger": "url"}, timeout=20)
 
     def open_problem(self, ref: ProblemRef) -> Problem | None:
         if self.catalog.is_paid(ref.number):
@@ -203,6 +217,48 @@ class ExtensionBrowser:
             raise SiteUnavailable("submission baseline is invalid")
         return latest
 
+    def next_page_after_manual_acceptance(self, problem: Problem) -> bool:
+        page = self.bridge.wait_for_page(timeout=5, require_active=False)
+        self._require_protocol(page)
+        meta = page["problem"]
+        if (meta.get("challenge") is True or meta.get("logged_in") is not True
+                or meta.get("slug") != page["slug"]):
+            return False
+        if page["slug"] == problem.ref.slug or meta.get("number") != problem.ref.number + 1:
+            return False
+        result = self.bridge.call(
+            "problem_status", page["slug"], {"question_slug": problem.ref.slug}, timeout=20,
+        )
+        if (result.get("question_slug") != problem.ref.slug
+                or result.get("number") != problem.ref.number
+                or problem.site_question_id and result.get("question_id") != problem.site_question_id):
+            raise SiteUnavailable("manual acceptance status belongs to another problem")
+        if result.get("status") not in {"AC", "NOT_STARTED", "TRIED"}:
+            raise SiteUnavailable("manual acceptance status is unavailable")
+        return result["status"] == "AC"
+
+    def pending_problem_accepted(self, problem: Problem) -> bool:
+        page = self.bridge.wait_for_page(timeout=5, require_active=False)
+        self._require_protocol(page)
+        meta = page["problem"]
+        if (meta.get("challenge") is True or meta.get("logged_in") is not True
+                or meta.get("slug") != page["slug"]):
+            return False
+        same_problem = page["slug"] == problem.ref.slug and meta.get("number") == problem.ref.number
+        next_problem = page["slug"] != problem.ref.slug and meta.get("number") == problem.ref.number + 1
+        if not (same_problem or next_problem):
+            return False
+        result = self.bridge.call(
+            "problem_status", page["slug"], {"question_slug": problem.ref.slug}, timeout=20,
+        )
+        if (result.get("question_slug") != problem.ref.slug
+                or result.get("number") != problem.ref.number
+                or problem.site_question_id and result.get("question_id") != problem.site_question_id):
+            raise SiteUnavailable("saved problem acceptance status belongs to another problem")
+        if result.get("status") not in {"AC", "NOT_STARTED", "TRIED"}:
+            raise SiteUnavailable("saved problem acceptance status is unavailable")
+        return result["status"] == "AC"
+
     def recover_submission(self, slug: str, digest: str, baseline_id: str | None) -> SubmissionReceipt | None:
         page = self.bridge.wait_for_page(timeout=8, require_active=False)
         if page["problem"].get("challenge") is True or page["problem"].get("logged_in") is not True:
@@ -218,6 +274,17 @@ class ExtensionBrowser:
             raise SiteUnavailable("recovered submission ID is invalid")
         return SubmissionReceipt(submission_id, digest, self.current.site_question_id if self.current else None)
 
+    def verify_captured_submission(self, slug: str, submission_id: str, digest: str) -> None:
+        page = self.bridge.wait_for_page(timeout=8, require_active=False)
+        if page["problem"].get("challenge") is True or page["problem"].get("logged_in") is not True:
+            raise SiteUnavailable("LeetCode login or verification is required for submission recovery")
+        result = self.bridge.call(
+            "verify_submission", page["slug"],
+            {"question_slug": slug, "submission_id": submission_id, "code_sha256": digest}, timeout=30,
+        )
+        if result.get("verified") is not True:
+            raise SiteUnavailable("captured submission code could not be verified")
+
     def submit_code(self, baseline_id: str | None = None) -> SubmissionReceipt:
         problem = self._current()
         if self.last_code is None:
@@ -228,7 +295,11 @@ class ExtensionBrowser:
                 "submit", problem.ref.slug,
                 {"code_sha256": digest, "trigger": self.submit_trigger}, timeout=20,
             )
+        except CapturedSubmissionUnavailable:
+            raise
         except SiteUnavailable as original:
+            if is_rate_limited(str(original)):
+                raise
             for retry in range(3):
                 try:
                     receipt = self.recover_submission(problem.ref.slug, digest, baseline_id)
@@ -255,10 +326,21 @@ class ExtensionBrowser:
                 raise SiteUnavailable("LeetCode login or verification is required to check the submission")
             try:
                 result = self.bridge.call(
-                    "check_submission", page["slug"], {"submission_id": receipt.submission_id}, timeout=25,
+                    "check_submission", page["slug"], {"submission_id": receipt.submission_id},
+                    timeout=min(30, max(1, deadline - time.monotonic())),
                 )
             except SiteUnavailable as exc:
-                if str(exc).startswith("bound Edge tab left ") or str(exc) == "check_submission result could not be confirmed":
+                reason = str(exc)
+                if is_rate_limited(reason):
+                    raise
+                retryable = (reason.startswith("bound Edge tab left ")
+                             or reason.startswith("check_submission result could not be confirmed")
+                             or reason in {"submission check timed out", "Failed to fetch"}
+                             or reason.startswith("LeetCode check HTTP 5"))
+                if retryable:
+                    delay = 2
+                    self.on_pause(f"Submission {receipt.submission_id}: result query delayed; retrying")
+                    time.sleep(min(delay, max(0, deadline - time.monotonic())))
                     continue
                 raise
             if result.get("kind") != "submit" or str(result.get("submission_id")) != receipt.submission_id:
@@ -267,7 +349,7 @@ class ExtensionBrowser:
             if receipt.question_id and question_id and str(question_id) != receipt.question_id:
                 raise SiteUnavailable("LeetCode check result belongs to another problem")
             if result.get("pending") is True:
-                time.sleep(2)
+                time.sleep(min(2, max(0, deadline - time.monotonic())))
                 continue
             if not isinstance(result.get("status_code"), int):
                 raise SiteUnavailable("LeetCode check result has no terminal status")
@@ -288,7 +370,11 @@ class ExtensionBrowser:
         fields = (result.get("last_testcase"), result.get("code_output"), result.get("expected_output"))
         if not any(isinstance(value, str) and value for value in fields):
             return None
-        return JudgeFeedback(*(value if isinstance(value, str) else "" for value in fields))
+        testcase, actual, expected = (value if isinstance(value, str) else "" for value in fields)
+        if result.get("status_code") == 14 and not expected and len(testcase) > 6000:
+            omitted = len(testcase) - 6000
+            testcase = f"{testcase[:3000]}\n... ({omitted} characters omitted) ...\n{testcase[-3000:]}"
+        return JudgeFeedback(testcase, actual, expected)
 
     def _require_protocol(self, page: dict) -> None:
         if isinstance(self.bridge, BrowserBridge):

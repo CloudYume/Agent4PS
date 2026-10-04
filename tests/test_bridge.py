@@ -7,7 +7,8 @@ import pytest
 
 from leetcode_agent.bridge import BrowserBridge, make_server
 from leetcode_agent.extension_browser import ExtensionBrowser, _statement_with_images
-from leetcode_agent.types import JudgeFeedback, Problem, ProblemRef, SiteUnavailable, SubmissionReceipt
+from leetcode_agent.types import (CapturedSubmissionUnavailable, JudgeFeedback, Problem,
+                                  ProblemRef, SiteUnavailable, SubmissionReceipt)
 
 
 def page(tab_id=7, active=True):
@@ -35,8 +36,9 @@ def test_problem_html_keeps_image_order_and_resolves_urls():
 
 def versioned_page(tab_id=7, active=True, ready=True):
     return {
-        **page(tab_id, active), "document_id": "document-1", "protocol_version": 3,
-        "capabilities": ["command_phase", "execution_heartbeat", "submission_recovery", "write_authorization"],
+        **page(tab_id, active), "document_id": "document-1", "protocol_version": 5,
+        "capabilities": ["command_phase", "execution_heartbeat", "submission_recovery", "write_authorization", "problem_status",
+                         "captured_submission_verification"],
         "ready": ready,
     }
 
@@ -83,6 +85,25 @@ def test_heartbeat_does_not_consume_command_and_phases_are_bound_to_document(tmp
         assert phases == [("submit", "request_seen", command["id"])]
 
 
+def test_bridge_preserves_unverified_id_when_submit_detail_is_rate_limited(tmp_path):
+    bridge = BrowserBridge(tmp_path / "token")
+    bridge.hello(versioned_page())
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        future = pool.submit(bridge.call, "submit", "two-sum", {"code_sha256": "a" * 64}, 3)
+        for _ in range(100):
+            if bridge.pending:
+                break
+            sleep(0.01)
+        command = bridge.hello(versioned_page())["command"]
+        identity = {"tab_id": 7, "command_id": command["id"], "kind": "submit",
+                    "slug": "two-sum", "document_id": "document-1"}
+        bridge.phase({**identity, "phase": "id_seen", "submission_id": "42"})
+        bridge.result({**identity, "ok": False, "error": "🐸☕超出访问限制，请稍后再试"})
+        with pytest.raises(CapturedSubmissionUnavailable, match="超出访问限制") as error:
+            future.result(timeout=3)
+        assert error.value.submission_id == "42"
+
+
 def test_bound_inactive_tab_can_deliver_read_only_check_from_heartbeat(tmp_path):
     bridge = BrowserBridge(tmp_path / "token")
     bridge.hello(versioned_page())
@@ -102,6 +123,118 @@ def test_bound_inactive_tab_can_deliver_read_only_check_from_heartbeat(tmp_path)
             "kind": "submit", "submission_id": "42", "status_code": 10,
         })
         assert future.result(timeout=3)["status_code"] == 10
+
+
+def test_problem_status_is_read_only_on_inactive_next_page(tmp_path):
+    bridge = BrowserBridge(tmp_path / "token")
+    next_page = versioned_page(active=False, ready=False)
+    next_page.update(slug="add-two-numbers", url="https://leetcode.cn/problems/add-two-numbers/",
+                     problem={"number": 2, "slug": "add-two-numbers", "logged_in": True})
+    bridge.hello(versioned_page())
+    bridge.hello(next_page)
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        future = pool.submit(bridge.call, "problem_status", "add-two-numbers",
+                             {"question_slug": "two-sum"}, 3)
+        for _ in range(100):
+            if bridge.pending:
+                break
+            sleep(0.01)
+        command = bridge.hello(next_page)["command"]
+        assert command["kind"] == "problem_status"
+        bridge.result({"tab_id": 7, "command_id": command["id"], "kind": "problem_status",
+                       "slug": "add-two-numbers", "document_id": "document-1", "ok": True,
+                       "question_slug": "two-sum", "question_id": "1", "number": 1, "status": "AC"})
+        assert future.result(timeout=3)["status"] == "AC"
+
+
+@pytest.mark.parametrize("next_number,status,expected", [
+    (2, "AC", True), (2, "TRIED", False), (3, "AC", False),
+])
+def test_manual_acceptance_requires_immediate_next_page_and_original_ac(next_number, status, expected):
+    class FakeBridge:
+        def __init__(self):
+            self.calls = 0
+
+        def wait_for_page(self, timeout, require_active):
+            assert timeout == 5 and require_active is False
+            return {"slug": "add-two-numbers", "problem": {
+                "slug": "add-two-numbers", "number": next_number, "logged_in": True,
+            }}
+
+        def call(self, kind, slug, payload, timeout):
+            self.calls += 1
+            assert (kind, slug, payload, timeout) == (
+                "problem_status", "add-two-numbers", {"question_slug": "two-sum"}, 20,
+            )
+            return {"question_slug": "two-sum", "question_id": "1", "number": 1, "status": status}
+
+    bridge = FakeBridge()
+    browser = ExtensionBrowser(bridge, None)
+    problem = Problem(ProblemRef(1, "one", "two-sum", "https://leetcode.cn/problems/two-sum/"),
+                      "statement", "starter", site_question_id="1")
+    assert browser.next_page_after_manual_acceptance(problem) is expected
+    assert bridge.calls == (0 if next_number != 2 else 1)
+
+
+def test_manual_acceptance_rejects_status_for_another_problem():
+    class FakeBridge:
+        def wait_for_page(self, timeout, require_active):
+            return {"slug": "add-two-numbers", "problem": {
+                "slug": "add-two-numbers", "number": 2, "logged_in": True,
+            }}
+
+        def call(self, kind, slug, payload, timeout):
+            return {"question_slug": "two-sum", "question_id": "other", "number": 1, "status": "AC"}
+
+    browser = ExtensionBrowser(FakeBridge(), None)
+    problem = Problem(ProblemRef(1, "one", "two-sum", "https://leetcode.cn/problems/two-sum/"),
+                      "statement", "starter", site_question_id="1")
+    with pytest.raises(SiteUnavailable, match="another problem"):
+        browser.next_page_after_manual_acceptance(problem)
+
+
+@pytest.mark.parametrize("status,number,expected", [
+    ("AC", 1, True), ("TRIED", 1, False), ("AC", 3, False),
+])
+def test_pending_acceptance_can_be_confirmed_on_original_page(status, number, expected):
+    class FakeBridge:
+        def wait_for_page(self, timeout, require_active):
+            return {"slug": "two-sum", "problem": {
+                "slug": "two-sum", "number": number, "logged_in": True,
+            }}
+
+        def call(self, kind, slug, payload, timeout):
+            assert (kind, slug, payload) == ("problem_status", "two-sum", {"question_slug": "two-sum"})
+            return {"question_slug": "two-sum", "question_id": "1", "number": 1, "status": status}
+
+    browser = ExtensionBrowser(FakeBridge(), None)
+    problem = Problem(ProblemRef(1, "one", "two-sum", "https://leetcode.cn/problems/two-sum/"),
+                      "statement", "starter", site_question_id="1")
+    assert browser.pending_problem_accepted(problem) is expected
+
+
+def test_rate_limit_navigation_requests_next_page_without_confirming_old_submission():
+    next_ref = ProblemRef(2, "two", "add-two-numbers", "https://leetcode.cn/problems/add-two-numbers/")
+
+    class Catalog:
+        def find(self, number):
+            assert number == 2
+            return next_ref
+
+    class FakeBridge:
+        def __init__(self):
+            self.calls = []
+
+        def wait_for_page(self, timeout, require_active):
+            return {"slug": "two-sum", "problem": {"slug": "two-sum", "number": 1}}
+
+        def call(self, kind, slug, payload, timeout):
+            self.calls.append((kind, slug, payload, timeout))
+            return {"ok": True}
+
+    bridge = FakeBridge()
+    ExtensionBrowser(bridge, Catalog()).navigate_after_rate_limit(1, "two-sum")
+    assert bridge.calls == [("navigate", "two-sum", {"url": next_ref.url, "trigger": "url"}, 20)]
 
 
 def test_switching_tabs_during_run_keeps_command_until_result(tmp_path):
@@ -250,6 +383,65 @@ def test_http_bridge_requires_pairing_and_authentication(tmp_path):
         thread.join(timeout=3)
 
 
+def test_reconnect_requires_previously_paired_extension_origin(tmp_path):
+    bridge = BrowserBridge(tmp_path / "token")
+    server = make_server("127.0.0.1", 0, bridge)
+    thread = Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    origin = "chrome-extension://" + "a" * 32
+    other_origin = "chrome-extension://" + "b" * 32
+    try:
+        with httpx.Client(base_url=f"http://127.0.0.1:{server.server_port}") as client:
+            assert client.post("/v1/reconnect", json={}, headers={"Origin": origin}).status_code == 403
+            assert client.post("/v1/reconnect", json={}).status_code == 403
+            paired = client.post("/v1/pair", json={"code": bridge.pair_code}, headers={"Origin": origin})
+            assert paired.status_code == 200
+            token = paired.json()["token"]
+            restored = client.post("/v1/reconnect", json={}, headers={"Origin": origin})
+            assert restored.status_code == 200
+            assert restored.json()["token"] == token
+            assert client.post("/v1/reconnect", json={}, headers={"Origin": other_origin}).status_code == 403
+            assert client.post("/v1/reconnect", json={}, headers={"Origin": "https://leetcode.cn"}).status_code == 403
+        restarted = BrowserBridge(tmp_path / "token")
+        assert restarted.reconnect(origin) == token
+        assert restarted.reconnect(other_origin) is None
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=3)
+
+
+def test_existing_token_registers_extension_origin_without_new_pairing(tmp_path):
+    bridge = BrowserBridge(tmp_path / "token")
+    server = make_server("127.0.0.1", 0, bridge)
+    thread = Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    origin = "chrome-extension://" + "c" * 32
+    try:
+        with httpx.Client(base_url=f"http://127.0.0.1:{server.server_port}") as client:
+            response = client.get("/v1/status", headers={"Authorization": f"Bearer {bridge.token}",
+                                                         "Origin": origin})
+            assert response.status_code == 200
+            assert client.post("/v1/reconnect", json={}, headers={"Origin": origin}).json()["token"] == bridge.token
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=3)
+
+
+def test_deleting_bridge_token_revokes_automatic_reconnect(tmp_path):
+    path = tmp_path / "token"
+    origin = "chrome-extension://" + "d" * 32
+    original = BrowserBridge(path)
+    assert original.pair(original.pair_code, origin) == original.token
+    path.unlink()
+
+    replacement = BrowserBridge(path)
+    assert replacement.reconnect(origin) is None
+    assert replacement.token != original.token
+    assert not replacement.origin_path.exists()
+
+
 def test_extension_browser_rejects_unmatched_result(tmp_path):
     class FakeBridge:
         def call(self, kind, slug, payload, timeout):
@@ -363,6 +555,28 @@ def test_submit_recovers_matching_new_id_without_retrying_click():
     assert bridge.calls == ["submit", "recover_submission"]
 
 
+def test_submit_does_not_query_history_after_rate_limit_or_captured_id():
+    class FakeBridge:
+        def __init__(self, error):
+            self.error = error
+            self.calls = []
+
+        def call(self, kind, slug, payload=None, timeout=120):
+            self.calls.append(kind)
+            raise self.error
+
+    for error in (SiteUnavailable("超出访问限制，请稍后再试"),
+                  CapturedSubmissionUnavailable("LeetCode GraphQL HTTP 429", "42")):
+        bridge = FakeBridge(error)
+        browser = ExtensionBrowser(bridge, None)
+        browser.current = Problem(ProblemRef(1, "one", "two-sum", "https://leetcode.cn/problems/two-sum/"),
+                                  "statement", "starter")
+        browser.last_code = "class Solution: pass"
+        with pytest.raises(SiteUnavailable):
+            browser.submit_code()
+        assert bridge.calls == ["submit"]
+
+
 def test_submission_detail_includes_performance_metrics():
     assert ExtensionBrowser._detail({
         "status_msg": "Accepted",
@@ -447,6 +661,62 @@ def test_submission_check_waits_for_terminal_result_and_matches_problem(monkeypa
     browser = ExtensionBrowser(bridge, None)
     assert browser.check_submission(SubmissionReceipt("42", "hash", "1")).passed
     assert not bridge.results
+
+
+def test_submission_check_retries_slow_queries_for_the_same_receipt(monkeypatch):
+    monkeypatch.setattr("leetcode_agent.extension_browser.time.sleep", lambda _: None)
+
+    class FakeBridge:
+        def __init__(self):
+            self.calls = []
+            self.responses = [
+                SiteUnavailable("check_submission result could not be confirmed (last phase: started)"),
+                SiteUnavailable("submission check timed out"),
+                {"kind": "submit", "submission_id": "42", "question_id": "1",
+                 "status_code": 10, "status_msg": "Accepted"},
+            ]
+
+        def wait_for_page(self, timeout, require_active=True):
+            return {"slug": "next-problem", "problem": {"logged_in": True}}
+
+        def call(self, kind, slug, payload, timeout):
+            self.calls.append((kind, slug, payload["submission_id"]))
+            response = self.responses.pop(0)
+            if isinstance(response, Exception):
+                raise response
+            return response
+
+    bridge = FakeBridge()
+    notes = []
+    browser = ExtensionBrowser(bridge, None, on_pause=notes.append)
+    assert browser.check_submission(SubmissionReceipt("42", "hash", "1")).passed
+    assert bridge.calls == [("check_submission", "next-problem", "42")] * 3
+    assert len(notes) == 2
+
+
+def test_submission_check_passes_rate_limit_to_navigation_handler():
+    class FakeBridge:
+        def wait_for_page(self, timeout, require_active=True):
+            return {"slug": "two-sum", "problem": {"logged_in": True}}
+
+        def call(self, kind, slug, payload, timeout):
+            raise SiteUnavailable("LeetCode check HTTP 429")
+
+    browser = ExtensionBrowser(FakeBridge(), None)
+    with pytest.raises(SiteUnavailable, match="429"):
+        browser.check_submission(SubmissionReceipt("42", "hash", "1"))
+
+
+def test_time_limit_feedback_keeps_case_shape_without_saving_huge_input():
+    testcase = "nums = [" + "1," * 30000 + "1]\nk = 50000"
+    feedback = ExtensionBrowser._judge_feedback({
+        "status_code": 14, "status_msg": "Time Limit Exceeded", "last_testcase": testcase,
+    })
+    assert feedback is not None
+    assert len(feedback.testcase) < 6100
+    assert feedback.testcase.startswith("nums = [1,1,")
+    assert feedback.testcase.endswith("k = 50000")
+    assert "characters omitted" in feedback.testcase
 
 
 def test_submission_check_rejects_other_question():

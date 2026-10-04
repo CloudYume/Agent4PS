@@ -2,6 +2,7 @@
   "manifest_version": 3,
   "name": "Agent4PS Bridge",
   "version": "0.2.0",
+  "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEA8CJRaoQ/eSMtfRGcl4N5SfERRDy05iBhjprnMVvWg+CKQWLqpRZEo1mpyjX1MIkO+F0AGGtQG7/oM94pW8wpFPj+TyyYR2IvJKP7QP0CAUtPWvEcEwyTmrdE9ZYvdFWfSNTM+8BV+y/GwXobndmfjpElk/gUnrEOrYBtyYoSgv+/qiWYOXJdTAmdMzIDeFFw5vzz5rYaFnpEkr9h4kKuuQMQAgv8nxK+pG8POxa6KcwUgVjTD3NOeDdGUX5hXeM0JGeY0R4NDba9+K6/ZbbGsJ1fDuhtP+OEUIs/lCP8jaL5ZC4ynLRTlqjg3RD5XpE6W1xM0TQ17atg2uuNQTIj4QIDAQAB",
   "description": "Connect the active LeetCode tab to the local Agent4PS runner.",
   "permissions": ["storage", "tabs", "scripting"],
   "host_permissions": ["https://leetcode.cn/*", "http://127.0.0.1/*"],

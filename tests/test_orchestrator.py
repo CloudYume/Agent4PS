@@ -7,7 +7,9 @@ from leetcode_agent.local_check import check_candidate
 from leetcode_agent.orchestrator import Orchestrator
 from leetcode_agent.progress import ArtifactStore, ProgressStore, _digest
 from leetcode_agent.settings import load_settings
-from leetcode_agent.types import Candidate, CheckResult, JudgeFeedback, ModelUnavailable, Problem, ProblemRef, Reference, SampleCase, SiteUnavailable, SubmissionReceipt
+from leetcode_agent.types import (Candidate, CapturedSubmissionUnavailable, CheckResult, JudgeFeedback,
+                                  ModelUnavailable, Problem, ProblemRef, Reference, SampleCase,
+                                  SiteUnavailable, SubmissionReceipt)
 
 
 REF = ProblemRef(2, "两数相加", "add-two-numbers", "https://leetcode.cn/problems/add-two-numbers/")
@@ -487,6 +489,23 @@ def test_unconfirmed_submission_blocks_duplicate_run(tmp_path):
     assert progress.load()["next_id"] == 3
 
 
+def test_captured_id_is_saved_as_unverified_before_recovery(tmp_path):
+    class LimitedBrowser(FakeBrowser):
+        def submit_code(self, baseline_id=None):
+            self.submit_calls += 1
+            raise CapturedSubmissionUnavailable("超出访问限制，请稍后再试", "42")
+
+    browser = LimitedBrowser([CheckResult(True, "site run passed")])
+    agent, progress = make_agent(tmp_path, browser, FakeModel(), FakeSearch(), save_artifacts=False)
+    with pytest.raises(CapturedSubmissionUnavailable):
+        agent.run_one()
+    record = progress.load()["records"]["2"]
+    assert record["status"] == "submission_unconfirmed"
+    assert record["submission_id"] == "42"
+    assert record["submission_verified"] is False
+    assert browser.submit_calls == 1
+
+
 def test_unknown_judge_result_preserves_receipt_without_resubmitting(tmp_path):
     class PendingBrowser(FakeBrowser):
         def check_submission(self, receipt):
@@ -835,3 +854,78 @@ def test_site_ac_reconciles_saved_candidate_without_claiming_agent_submission(tm
     assert progress.load()["records"]["2"]["status"] == "already_accepted"
     assert "未确认本程序提交 ID" in (folder / "README.md").read_text(encoding="utf-8")
     assert (folder / "attempts" / "01-before-external-ac.md").read_text(encoding="utf-8") == old_readme
+
+
+def test_manual_ac_and_next_page_continue_after_run_is_interrupted(tmp_path):
+    next_ref = ProblemRef(3, "无重复字符的最长子串", "longest-substring-without-repeating-characters",
+                          "https://leetcode.cn/problems/longest-substring-without-repeating-characters/")
+    next_problem = Problem(next_ref, "返回无重复字符的最长子串长度。",
+                           "class Solution:\n    def lengthOfLongestSubstring(self, s):\n        pass\n")
+
+    class Browser(FakeBrowser):
+        def __init__(self):
+            super().__init__([CheckResult(True, "next run passed")], [CheckResult(True, "accepted")])
+            self.verified = 0
+
+        def find_problem(self, number):
+            return {2: REF, 3: next_ref}.get(number)
+
+        def open_problem(self, ref):
+            return PROBLEM if ref == REF else next_problem
+
+        def run_code(self, code):
+            if self.verified == 0:
+                raise SiteUnavailable("bound Edge tab left add-two-numbers during run; current problem preserved")
+            return super().run_code(code)
+
+        def next_page_after_manual_acceptance(self, problem):
+            assert problem.ref == REF
+            self.verified += 1
+            return True
+
+    browser = Browser()
+    agent, progress = make_agent(tmp_path, browser, FakeModel(), FakeSearch())
+    progress.anchor(2)
+
+    assert agent.run_one()["status"] == "already_accepted"
+    assert progress.load()["next_id"] == 3
+    assert progress.load()["records"]["2"]["status"] == "already_accepted"
+    assert browser.submit_calls == 0
+    assert agent.run_one()["status"] == "accepted"
+    assert progress.load()["next_id"] == 4
+
+
+@pytest.mark.parametrize("status,verified", [("candidate_ready", False), ("submit_intent", True)])
+def test_manual_navigation_does_not_skip_unconfirmed_problem(tmp_path, status, verified):
+    class Browser(FakeBrowser):
+        def __init__(self):
+            super().__init__([])
+            self.verified = 0
+
+        def run_code(self, code):
+            raise SiteUnavailable("bound Edge tab left add-two-numbers during run; current problem preserved")
+
+        def prepare_submission(self):
+            raise SiteUnavailable("bound Edge tab left add-two-numbers during submission_baseline")
+
+        def next_page_after_manual_acceptance(self, problem):
+            self.verified += 1
+            return verified
+
+    browser = Browser()
+    agent, progress = make_agent(tmp_path, browser, FakeModel(), FakeSearch())
+    progress.anchor(2)
+    if status == "submit_intent":
+        def submit_unknown(baseline_id=None):
+            raise SiteUnavailable("submission result unknown")
+        browser.run_code = lambda code: CheckResult(True, "site run passed")
+        browser.submit_code = submit_unknown
+        browser.prepare_submission = lambda: "100"
+
+    with pytest.raises(SiteUnavailable):
+        agent.run_one()
+    assert progress.load()["next_id"] == 2
+    assert progress.load()["records"]["2"]["status"] == (
+        "submission_unconfirmed" if status == "submit_intent" else "candidate_ready"
+    )
+    assert browser.verified == (0 if status == "submit_intent" else 1)

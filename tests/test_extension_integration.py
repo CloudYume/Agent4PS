@@ -67,17 +67,18 @@ def _await_command(page, future, polls=60):
     return future.result(timeout=1)
 
 
-@pytest.mark.parametrize("trigger,missing_request_code,redirect_after_submit,ignore_next_shortcut,lost_receipt,mismatched_detail,stray_terminal,editor_delay", [
-    ("button", False, False, False, False, False, False, 0), ("shortcut", False, False, True, False, False, False, 0),
-    ("button", True, False, False, False, False, False, 0), ("button", False, True, False, False, False, False, 0),
-    ("shortcut", False, False, False, True, False, False, 0),
-    ("button", True, False, False, False, True, False, 0),
-    ("shortcut", False, False, False, False, False, True, 0),
-    ("button", False, False, False, False, False, False, 1500),
+@pytest.mark.parametrize("trigger,missing_request_code,redirect_after_submit,ignore_next_shortcut,lost_receipt,mismatched_detail,stray_terminal,editor_delay,detail_rate_limited", [
+    ("button", False, False, False, False, False, False, 0, False), ("shortcut", False, False, True, False, False, False, 0, False),
+    ("button", True, False, False, False, False, False, 0, False), ("button", False, True, False, False, False, False, 0, False),
+    ("shortcut", False, False, False, True, False, False, 0, False),
+    ("button", True, False, False, False, True, False, 0, False),
+    ("shortcut", False, False, False, False, False, True, 0, False),
+    ("button", False, False, False, False, False, False, 1500, False),
+    ("button", False, False, False, False, False, False, 0, True),
 ])
 def test_edge_extension_writes_runs_and_correlates_submission(
     tmp_path, trigger, missing_request_code, redirect_after_submit, ignore_next_shortcut,
-    lost_receipt, mismatched_detail, stray_terminal, editor_delay,
+    lost_receipt, mismatched_detail, stray_terminal, editor_delay, detail_rate_limited,
 ):
     playwright = pytest.importorskip("playwright.sync_api")
     bridge = BrowserBridge(tmp_path / "bridge-token")
@@ -111,8 +112,21 @@ def test_edge_extension_writes_runs_and_correlates_submission(
                         if operation == "AgentSubmissionDetail":
                             assert "$id: ID!" in request.request.post_data_json["query"]
                             assert isinstance(request.request.post_data_json["variables"]["id"], str)
+                            if detail_rate_limited:
+                                request.fulfill(json={"errors": [{"message": "🐸☕超出访问限制，请稍后再试"}]})
+                                return
                             submitted_code = "class Solution:\n    pass\n" if mismatched_detail else code
                             request.fulfill(json={"data": {"submissionDetail": {"code": submitted_code}}})
+                            return
+                        if operation == "AgentProblemStatus":
+                            slug = request.request.post_data_json["variables"]["slug"]
+                            request.fulfill(json={"data": {
+                                "userStatus": {"isSignedIn": True},
+                                "question": {"questionId": "1" if slug == "two-sum" else "2",
+                                             "questionFrontendId": "1" if slug == "two-sum" else "2",
+                                             "titleSlug": slug,
+                                             "status": "AC" if slug == "two-sum" and "42" in submissions else None},
+                            }})
                             return
                         slug = request.request.post_data_json.get("variables", {}).get("slug", "two-sum")
                         assert "translatedContent" in request.request.post_data_json["query"]
@@ -124,7 +138,8 @@ def test_edge_extension_writes_runs_and_correlates_submission(
                                 "titleSlug": slug, "translatedTitle": "Two Sum",
                                 "content": "<p>Given an array of integers, find two numbers that add up to a target.</p>",
                                 "translatedContent": "<p>给你一个整数数组，请找出和为目标值的两个数。</p>",
-                                "status": None, "isPaidOnly": False,
+                                "status": "AC" if slug == "two-sum" and "42" in submissions else None,
+                                "isPaidOnly": False,
                                 "codeSnippets": [{"langSlug": "python3", "code": "class Solution:\n    def twoSum(self):\n        pass"}],
                             },
                         }})
@@ -147,6 +162,15 @@ def test_edge_extension_writes_runs_and_correlates_submission(
                             "input_formatted": "[2,7]\n9",
                             "code_answer": [[0, 1]], "expected_code_answer": [[0, 1]],
                         })
+                    elif "/43/check" in url:
+                        request.fulfill(json={
+                            "submission_id": "43", "question_id": "1", "finished": True,
+                            "status_code": 14, "status_msg": "Time Limit Exceeded",
+                            "total_correct": 44, "total_testcases": 47,
+                            "last_testcase": "nums = [" + "1," * 150000 + "1]\nk = 50000",
+                        })
+                    elif "/44/check" in url:
+                        request.fulfill(json={"submission_id": "44", "question_id": "1"})
                     elif "/41/check" in url:
                         request.fulfill(json={"submission_id": "41", "question_id": "1", "finished": True, "status_code": 10, "status_msg": "Accepted"})
                     else:
@@ -166,6 +190,17 @@ def test_edge_extension_writes_runs_and_correlates_submission(
                     if attempt == 0:
                         page.reload()
                 assert bridge.status()["connected"]
+                if (trigger, missing_request_code, redirect_after_submit, ignore_next_shortcut,
+                        lost_receipt, mismatched_detail, stray_terminal, editor_delay, detail_rate_limited) == (
+                        "button", False, False, False, False, False, False, 0, False):
+                    assert bridge.paired_origin is not None
+                    worker.evaluate("() => chrome.storage.local.remove('bridgeToken')")
+                    for _ in range(40):
+                        token = worker.evaluate("() => chrome.storage.local.get('bridgeToken')")
+                        if token.get("bridgeToken") == bridge.token:
+                            break
+                        page.wait_for_timeout(250)
+                    assert token.get("bridgeToken") == bridge.token
                 initial_page = bridge.wait_for_page("two-sum")
                 assert initial_page["problem"]["status"] == "NOT_STARTED"
                 assert "给你一个整数数组" in initial_page["problem"]["content"]
@@ -225,6 +260,27 @@ def test_edge_extension_writes_runs_and_correlates_submission(
                     page.evaluate("value => { window.reloadAfterSubmit = value; }", lost_receipt)
                     page.evaluate("value => { window.checkOldSubmission = value; }", stray_terminal)
                     submit = pool.submit(bridge.call, "submit", "two-sum", {"code_sha256": digest, "trigger": trigger}, 30)
+                    if detail_rate_limited:
+                        from leetcode_agent.types import CapturedSubmissionUnavailable
+                        with pytest.raises(CapturedSubmissionUnavailable, match="超出访问限制") as error:
+                            _await_command(page, submit)
+                        assert error.value.submission_id == "42"
+                        assert submissions == ["42"]
+                        navigate = pool.submit(bridge.call, "navigate", "two-sum", {
+                            "url": "https://leetcode.cn/problems/add-two-numbers/", "trigger": "url",
+                        }, 30)
+                        assert _await_command(page, navigate)["ok"] is True
+                        for _ in range(40):
+                            if bridge.status()["slug"] == "add-two-numbers":
+                                break
+                            page.wait_for_timeout(250)
+                        assert bridge.status()["slug"] == "add-two-numbers"
+                        detail_rate_limited = False
+                        verified = pool.submit(bridge.call, "verify_submission", "add-two-numbers", {
+                            "question_slug": "two-sum", "submission_id": "42", "code_sha256": digest,
+                        }, 30)
+                        assert _await_command(page, verified)["verified"] is True
+                        return
                     if stray_terminal:
                         with pytest.raises(Exception, match="submission ID missing"):
                                 _await_command(page, submit, polls=120)
@@ -304,6 +360,19 @@ def test_edge_extension_writes_runs_and_correlates_submission(
                         assert page.evaluate("sessionStorage.getItem('nextShortcutCount')") == "1"
                     checked_next_page = pool.submit(bridge.call, "check_submission", "add-two-numbers", {"submission_id": "42"}, 30)
                     assert _await_command(page, checked_next_page)["question_id"] == "1"
+                    if check_heartbeat:
+                        tle = pool.submit(bridge.call, "check_submission", "add-two-numbers",
+                                          {"submission_id": "43"}, 30)
+                        tle_result = _await_command(page, tle)
+                        assert tle_result["status_code"] == 14
+                        assert len(tle_result["last_testcase"]) < 6100
+                        assert tle_result["last_testcase"].endswith("k = 50000")
+                        pending = pool.submit(bridge.call, "check_submission", "add-two-numbers",
+                                              {"submission_id": "44"}, 30)
+                        assert _await_command(page, pending)["pending"] is True
+                    status = pool.submit(bridge.call, "problem_status", "add-two-numbers",
+                                         {"question_slug": "two-sum"}, 30)
+                    assert _await_command(page, status)["status"] == "AC"
             finally:
                 context.close()
     finally:

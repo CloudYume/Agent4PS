@@ -517,6 +517,8 @@ class ModelClient:
             "For void in-place methods, account for the mutated first argument in judge feedback. "
             "The failure includes judge input, actual output, and expected output when available. "
             "For runtime errors, fix the cited exception or judge type mismatch without changing a correct algorithm. "
+            "For time-limit failures, inspect the failing input pattern and worst-case behavior, including "
+            "partitions with many equal values; change the algorithm rather than tuning constants. "
             "Never redefine LeetCode's ListNode or TreeNode classes. "
             "Use only site-reported failing inputs and outputs as authoritative evidence. "
             "When backtracking mutates shared state, restore exactly the changes made by that branch. "

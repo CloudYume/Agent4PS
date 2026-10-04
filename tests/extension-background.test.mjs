@@ -71,3 +71,41 @@ test('code write requires the active tab, live run command, and visible matching
   assert.equal(active.ok, true);
   assert.deepEqual(writes, ['class Solution: pass\n']);
 });
+
+test('background restores a missing or stale token without a pairing code', async () => {
+  const source = fs.readFileSync(path.resolve('extension/background.js'), 'utf8');
+  let listener;
+  const stored = { bridgePort: 8765 };
+  const requests = [];
+  const chrome = {
+    runtime: { onMessage: { addListener(callback) { listener = callback; } } },
+    storage: { local: {
+      async get(keys) {
+        return Object.fromEntries(keys.map((key) => [key, stored[key]]));
+      },
+      async set(values) { Object.assign(stored, values); },
+      async remove(key) { delete stored[key]; },
+    } },
+  };
+  const fetch = async (url, options) => {
+    requests.push({ url, authorization: options.headers.Authorization });
+    if (url.endsWith('/v1/reconnect')) {
+      return { ok: true, status: 200, json: async () => ({ token: 'restored-token' }) };
+    }
+    assert.match(url, /\/v1\/status$/);
+    return options.headers.Authorization === 'Bearer restored-token'
+      ? { status: 200, json: async () => ({ connected: false }) }
+      : { status: 401, json: async () => ({ error: 'not paired' }) };
+  };
+  vm.runInNewContext(source, { chrome, fetch });
+  const send = (message) => new Promise((resolve) => listener(message, {}, resolve));
+
+  assert.equal((await send({ type: 'STATUS' })).paired, true);
+  assert.equal(stored.bridgeToken, 'restored-token');
+  stored.bridgeToken = 'stale-token';
+  assert.equal((await send({ type: 'STATUS' })).paired, true);
+  assert.equal(stored.bridgeToken, 'restored-token');
+  assert.deepEqual(requests.map((request) => request.url.split('/').at(-1)), [
+    'reconnect', 'status', 'status', 'reconnect', 'status',
+  ]);
+});

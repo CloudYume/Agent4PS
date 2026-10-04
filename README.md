@@ -91,7 +91,8 @@ flowchart TD
 
 ```powershell
 py -3.12 -m venv .venv
-.\.venv\Scripts\python.exe -m pip install -r requirements.txt
+.\.venv\Scripts\python.exe -m pip install -e .
+.\.venv\Scripts\Activate.ps1
 ```
 
 ### 2. 配置模型密钥
@@ -114,12 +115,12 @@ Remove-Variable secret
 
 ```powershell
 .\.venv\Scripts\python.exe -m leetcode_agent doctor
-.\.venv\Scripts\python.exe -m leetcode_agent run
+run
 ```
 
-4. 首次连接时，点击 Edge 工具栏的 Agent4PS 图标，输入**这次运行**显示的 6 位配对码。配对码 10 分钟内有效；成功后扩展会刷新活动题目页。后续通常沿用 `.local/bridge-token` 与扩展本地存储中的配对令牌。
+4. 首次连接时，点击 Edge 工具栏的 Agent4PS 图标，输入**这次运行**显示的 6 位配对码。配对码 10 分钟内有效；成功后扩展会刷新活动题目页。之后会沿用 `.local/bridge-token`；即使扩展本地存储丢失，同一扩展身份也可自动恢复配对。
 
-扩展弹窗的“本地端口”必须与 `config.yaml` 的 `browser.port` 一致。修改 Python 代码或配置后需重启 `run`；修改扩展文件后还需在 `edge://extensions` 重新加载扩展并刷新题目页。
+`run` 是安装到已激活虚拟环境的命令，等同于 `python -m leetcode_agent run`；`run --start-current` 和 `run --config <路径>` 仍可使用。未激活虚拟环境时，可继续使用完整的 Python 命令。扩展弹窗的“本地端口”必须与 `config.yaml` 的 `browser.port` 一致。修改 Python 代码或配置后需重启 `run`；修改扩展文件后还需在 `edge://extensions` 重新加载扩展并刷新题目页。本次升级为解压版扩展固定了 ID，因此升级后可能需再输入一次配对码；后续更新沿用该身份。
 
 ### 4. 查看与停止
 
@@ -127,7 +128,7 @@ Remove-Variable secret
 .\.venv\Scripts\python.exe -m leetcode_agent status
 ```
 
-交互式终端显示当前题目的阶段、耗时和详细日志。按 `Ctrl+C` 停止；手动提交或切换题目前，先停止运行器，避免与自动流程竞争。`login` 命令只打印登录提示，不会代替浏览器登录。
+交互式终端显示当前题目的阶段、耗时和详细日志。按 `Ctrl+C` 停止。若运行卡住并由你手动提交 AC、点击下一题，Agent 会只读核对原题的站内 AC 状态，确认后从新题继续；无法确认时停止并保留原题断点。`login` 命令只打印登录提示，不会代替浏览器登录。
 
 | 命令 | 用途 |
 | --- | --- |
@@ -156,7 +157,7 @@ Remove-Variable secret
 | --- | --- | --- |
 | `candidate_ready` / `run_verified` | 已保存候选，尚未确认正式提交 | 重新校验候选，继续当前题 |
 | `needs_repair` | 已保存失败反馈 | 旧本地用例失败先重验；站内失败带原始反馈请求修复 |
-| `submit_intent` / `submission_unconfirmed` | 已准备或发起提交，结果尚未确认 | 只读查询提交记录及判题，不再次点击提交 |
+| `submit_intent` / `submission_unconfirmed` | 已准备或发起提交，结果尚未确认 | 只读查询提交记录及判题，不再次点击提交；确认 WA/TLE 后转入修复。若用户已手动 AC 且绑定标签到了下一题，可核对站内 AC 后继续 |
 | `accepted` | 本程序按提交 ID 确认 Accepted | 从下一题继续 |
 | `already_accepted` / `skipped` | 站内已有 AC，或题目缺失、付费、不可运行 | 从下一题继续 |
 | `needs_review` | 用完修复次数 | 记录待人工审查，并继续下一题 |
@@ -166,7 +167,7 @@ Remove-Variable secret
 
 ### 提交确认与人工处理
 
-提交前，扩展读取该题最新提交 ID 作为基线，Python 保存候选代码的 SHA-256。点击提交后，扩展捕获正式提交 ID，并核对该 ID 对应的站内代码。仅当 ID、代码和判题结果可关联时，程序才把 Accepted 记为自动完成。页面刷新或回执丢失时，只读查询基线之后的新提交；无法唯一确认时保留待确认状态并停止。
+提交前，扩展读取该题最新提交 ID 作为基线，Python 保存候选代码的 SHA-256。点击提交后，扩展捕获正式提交 ID，并核对该 ID 对应的站内代码。若详情接口此时限流，ID 会以“未核验”状态保存；程序先尝试切到下一题页面并等待 60 秒，然后确认旧提交属于原题且代码哈希匹配，再查询判题。旧提交未确认前不会开始解下一题。仅当 ID、代码和判题结果可关联时，程序才把 Accepted 记为自动完成。页面刷新或回执丢失时，只读查询基线之后的新提交；若没有 ID 但站内可确认原题 AC，则记为 `already_accepted` 并继续，不冒称程序提交成功。继续限流时会再退避查询，不会再次点击提交；重启后确认该提交为 WA、TLE 或运行时错误时，会保存反馈并继续修复。
 
 旧版本的记录若缺少可恢复的 ID 或基线，需要先在力扣提交记录中人工核对**题号、代码和结果**，再执行其一：
 
@@ -183,6 +184,8 @@ Remove-Variable secret
 ### 等待与导航
 
 写入代码和触发站内操作要求绑定的题目标签处于活动状态。运行前切到其他标签，程序会等待原题标签重新激活并核对题号。确认 AC 后按题库 URL 导航到下一题；目标页 30 秒未出现时会检查扩展状态，必要时等待标签重新激活或重试导航，再等待目标页。仍无法确认则停止，游标保留在下一题。
+
+单题执行期间手动提交 AC 并在绑定标签点击下一题时，若原题执行被导航打断，Agent 会从新页面只读查询原题状态。只有新页面是紧接着的题目、原题题号与 slug 匹配且站内返回 AC，才记录 `already_accepted` 并继续。恢复 `submit_intent` 或 `submission_unconfirmed` 时也会先做这项核对；旧提交 ID 作为未确认的审计信息保留，不会被记为本程序提交成功。若未确认站内 AC，仍按旧提交 ID 查询，不重复点击提交。
 
 默认使用页面按钮提交和 URL 导航。`browser.submit_trigger`、`browser.navigation_trigger` 可分别改为 `shortcut`，但力扣是否接受合成快捷键取决于页面实现。模型响应时间、站点加载和判题排队都影响总耗时，程序不保证固定的每题用时。
 
@@ -211,15 +214,19 @@ Remove-Variable secret
 
 | 现象 | 检查与处理 |
 | --- | --- |
-| `invalid pairing code` | 确认使用**当前** `run` 进程的 6 位码；核对扩展端口与 `browser.port`。旧进程的码、过期码或超过尝试次数的码无效。 |
+| `invalid pairing code` | 确认使用**当前** `run` 进程的 6 位码；核对扩展端口与 `browser.port`。旧进程的码、过期码或超过尝试次数的码无效。扩展身份变化或 `.local/bridge-token` 被删除后需重新配对。 |
 | 一直等待活动题目标签 | 在主 Edge 窗口激活 `leetcode.cn/problems/.../` 页面并刷新；检查扩展弹窗连接状态。扩展更新后重新加载扩展和题目页。 |
+| 已显示活动标签，仍停在题库查询 | 有些题号（如 SQL 题 262）不在算法列表。程序会在升序题库越过该题号后跳过，并继续下一题；查询阶段会显示当前题号。 |
 | 协议版本不匹配 | 在 `edge://extensions` 重新加载 Agent4PS，再刷新题目标签；Python 运行器也需重启。 |
 | `LeetCode GraphQL HTTP 400` | 刷新题目页并核对登录状态；若仍出现，检查站点页面/API 变化及扩展日志。进度不会因此跳题。 |
 | 模型长时间无正文或超时 | 检查 endpoint、模型 ID、密钥和服务状态；可调整 API 超时。超时后当前题号仍保留。 |
 | `model response was not a JSON object` | 当前提示要求完整 Python 提交代码，同时兼容旧 JSON 回答；两种格式都无法识别时用备用模型重试一次，仍失败则保留题号。 |
 | WA 后模型重复原逻辑 | 先核对保存反馈来自站内运行或正式提交。站内失败输入、实际输出和预期输出会随修复请求发送；相同逻辑会再尝试备用模型。两次仍相同则停止并保留 `needs_repair`，不会把模型自拟用例当作站内 WA。 |
 | `submission_unconfirmed` | 先查看站内提交记录。重启会尝试只读恢复；仍不明确时，人工核对后使用 `resolve`，不要直接再次运行提交。 |
+| `超出访问限制，请稍后再试` | 提交后先尝试切到下一题页面，等待 60 秒，再只读核对已保存的 ID 或候选代码；无法核对时保留当前题，不重复提交。等待站点恢复后重启 `run`。 |
+| `check_submission result could not be confirmed` | 站内判题查询超时；当前提交 ID 和候选已保存。更新扩展并重启 `run`，程序会只读重查同一提交，确认失败后继续修复。 |
 | AC 后下一题加载超时 | 保持绑定标签活动并确认目标题页可打开；游标已在下一题，重启后会从该题继续。 |
+| 手动 AC 并点击下一题后仍停止 | 重载 Edge 扩展并刷新题目页；确认原题站内显示 AC、新页面为紧接着的题目。若状态是 `submission_unconfirmed`，按提交确认流程处理。 |
 
 ## 项目结构与测试
 
@@ -252,7 +259,7 @@ node --test tests/extension-hook.test.mjs tests/extension-background.test.mjs
 
 ## 安全与限制
 
-- 配对令牌保存在 `.local/bridge-token` 和扩展本地存储；不要把该文件、API 密钥或完整 `Output/progress.json` 上传到公开仓库。
+- 配对令牌保存在 `.local/bridge-token` 和扩展本地存储；`.local/bridge-token.origin` 记录获准恢复令牌的扩展身份。不要把令牌、API 密钥或完整 `Output/progress.json` 上传到公开仓库。
 - 浏览器 Cookie 留在 Edge；模型 API 会收到题目内容、代码及必要的失败反馈。公开题解搜索仅在配置门槛达到后进行。
 - 本地校验在限时、精简环境的子进程中运行模型生成的 Python 代码，**不是操作系统级沙箱**。请在可信本机环境使用。
 - 扩展依赖力扣页面结构与站内接口；站点改版可能需要更新扩展。无法确认代码、提交 ID 或判题归属时，程序会停止以保留审查机会。

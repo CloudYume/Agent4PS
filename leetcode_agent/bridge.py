@@ -12,15 +12,17 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
 
-from .types import SiteUnavailable
+from .types import CapturedSubmissionUnavailable, SiteUnavailable
 
 
 _SLUG = re.compile(r"^[a-z0-9-]+$")
-PROTOCOL_VERSION = 3
+_EXTENSION_ORIGIN = re.compile(r"^chrome-extension://[a-p]{32}$")
+PROTOCOL_VERSION = 5
 REQUIRED_CAPABILITIES = frozenset({
-    "command_phase", "execution_heartbeat", "submission_recovery", "write_authorization",
+    "command_phase", "execution_heartbeat", "submission_recovery", "write_authorization", "problem_status",
+    "captured_submission_verification",
 })
-READ_ONLY_COMMANDS = frozenset({"check_submission", "submission_baseline", "recover_submission"})
+READ_ONLY_COMMANDS = frozenset({"check_submission", "submission_baseline", "recover_submission", "problem_status", "verify_submission"})
 
 
 class _BridgeHTTPServer(ThreadingHTTPServer):
@@ -35,9 +37,14 @@ class _BridgeHTTPServer(ThreadingHTTPServer):
 class BrowserBridge:
     def __init__(self, token_path: Path, poll_interval_seconds: float = 0.5):
         token_path.parent.mkdir(parents=True, exist_ok=True)
+        self.origin_path = token_path.with_name(f"{token_path.name}.origin")
+        saved_origin = self.origin_path.read_text(encoding="ascii").strip() if self.origin_path.exists() else ""
+        self.paired_origin = saved_origin if _EXTENSION_ORIGIN.fullmatch(saved_origin) else None
         if token_path.exists():
             self.token = token_path.read_text(encoding="ascii").strip()
         else:
+            self.origin_path.unlink(missing_ok=True)
+            self.paired_origin = None
             self.token = secrets.token_urlsafe(32)
             token_path.write_text(self.token + "\n", encoding="ascii")
         self.pair_code = f"{secrets.randbelow(1_000_000):06d}"
@@ -65,15 +72,35 @@ class BrowserBridge:
                 f"LeetCode problem tab (page protocol {page.get('protocol_version')!r}; required {PROTOCOL_VERSION})"
             )
 
-    def pair(self, code: str) -> str | None:
+    def pair(self, code: str, origin: str | None = None) -> str | None:
         with self.cv:
             self.pair_attempts += 1
             if not self.pair_code or self.pair_attempts > 5 or time.monotonic() > self.pair_expires:
                 return None
             if not hmac.compare_digest(code, self.pair_code):
                 return None
+            if origin and _EXTENSION_ORIGIN.fullmatch(origin):
+                self._remember_origin(origin)
             self.pair_code = ""
             return self.token
+
+    def _remember_origin(self, origin: str) -> None:
+        self.origin_path.write_text(origin + "\n", encoding="ascii")
+        self.paired_origin = origin
+
+    def remember_authenticated_origin(self, origin: str | None) -> None:
+        if origin and _EXTENSION_ORIGIN.fullmatch(origin):
+            with self.cv:
+                if self.paired_origin is None:
+                    self._remember_origin(origin)
+
+    def reconnect(self, origin: str | None) -> str | None:
+        with self.cv:
+            if (origin and self.paired_origin
+                    and _EXTENSION_ORIGIN.fullmatch(origin)
+                    and hmac.compare_digest(origin, self.paired_origin)):
+                return self.token
+        return None
 
     def authorized(self, header: str | None) -> bool:
         return hmac.compare_digest(header or "", f"Bearer {self.token}")
@@ -123,6 +150,10 @@ class BrowserBridge:
                 raise ValueError("invalid command phase")
             entry["phase"] = phase
             entry["phase_at"] = time.monotonic()
+            if phase == "id_seen" and entry["command"]["kind"] == "submit":
+                submission_id = data.get("submission_id")
+                if isinstance(submission_id, str) and submission_id.isdecimal():
+                    entry["captured_submission_id"] = submission_id
             self.cv.notify_all()
             callback = self.on_phase
         if callback:
@@ -194,7 +225,11 @@ class BrowserBridge:
                     if entry["result"] is not None:
                         result = entry["result"]
                         if result.get("ok") is not True:
-                            raise SiteUnavailable(str(result.get("error") or f"{kind} failed")[:500])
+                            message = str(result.get("error") or f"{kind} failed")[:500]
+                            captured_id = result.get("submission_id") or entry.get("captured_submission_id")
+                            if kind == "submit" and isinstance(captured_id, str) and captured_id.isdecimal():
+                                raise CapturedSubmissionUnavailable(message, captured_id)
+                            raise SiteUnavailable(message)
                         return result
                     page = self.current
                     if (kind not in READ_ONLY_COMMANDS | {"run"} and entry["delivered"] and page
@@ -214,7 +249,11 @@ class BrowserBridge:
                     remaining = deadline - time.monotonic()
                     if remaining <= 0:
                         phase = entry["phase"]
-                        raise SiteUnavailable(f"{kind} result could not be confirmed (last phase: {phase})")
+                        message = f"{kind} result could not be confirmed (last phase: {phase})"
+                        captured_id = entry.get("captured_submission_id")
+                        if kind == "submit" and captured_id:
+                            raise CapturedSubmissionUnavailable(message, captured_id)
+                        raise SiteUnavailable(message)
                     self.cv.wait(min(remaining, 2))
             finally:
                 self.pending.pop(command_id, None)
@@ -273,6 +312,7 @@ def make_server(host: str, port: int, bridge: BrowserBridge) -> ThreadingHTTPSer
 
         def _auth(self) -> bool:
             if bridge.authorized(self.headers.get("Authorization")):
+                bridge.remember_authenticated_origin(self.headers.get("Origin"))
                 return True
             self._send(401, {"error": "not paired"})
             return False
@@ -280,8 +320,12 @@ def make_server(host: str, port: int, bridge: BrowserBridge) -> ThreadingHTTPSer
         def do_POST(self) -> None:
             try:
                 if self.path == "/v1/pair":
-                    token = bridge.pair(str(self._read().get("code", "")))
+                    token = bridge.pair(str(self._read().get("code", "")), self.headers.get("Origin"))
                     self._send(200 if token else 403, {"token": token} if token else {"error": "invalid pairing code"})
+                    return
+                if self.path == "/v1/reconnect":
+                    token = bridge.reconnect(self.headers.get("Origin"))
+                    self._send(200 if token else 403, {"token": token} if token else {"error": "pairing required"})
                     return
                 if not self._auth():
                     return

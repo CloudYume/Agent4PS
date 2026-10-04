@@ -1,15 +1,58 @@
+let reconnecting = null;
+let reconnectAfter = 0;
+
+async function reconnect(port) {
+  if (Date.now() < reconnectAfter) return null;
+  if (reconnecting) return reconnecting;
+  reconnecting = (async () => {
+    try {
+      const response = await fetch(`http://127.0.0.1:${port}/v1/reconnect`, {
+        method: "POST", headers: { "Content-Type": "application/json" }, body: "{}",
+      });
+      const data = await response.json();
+      if (response.ok && typeof data.token === "string" && data.token) {
+        await chrome.storage.local.set({ bridgeToken: data.token });
+        reconnectAfter = 0;
+        return data.token;
+      }
+    } catch (_) {}
+    reconnectAfter = Date.now() + 10000;
+    return null;
+  })();
+  try {
+    return await reconnecting;
+  } finally {
+    reconnecting = null;
+  }
+}
+
 async function request(path, body, authenticated = true) {
-  const { bridgeToken, bridgePort } = await chrome.storage.local.get(["bridgeToken", "bridgePort"]);
-  if (authenticated && !bridgeToken) return { paired: false };
+  let { bridgeToken, bridgePort } = await chrome.storage.local.get(["bridgeToken", "bridgePort"]);
   const port = Number.isInteger(bridgePort) && bridgePort >= 1024 && bridgePort <= 65535 ? bridgePort : 8765;
+  if (authenticated && !bridgeToken) {
+    bridgeToken = await reconnect(port);
+    if (!bridgeToken) return { paired: false };
+  }
   const headers = { "Content-Type": "application/json" };
   if (authenticated) headers.Authorization = `Bearer ${bridgeToken}`;
   try {
-    const response = await fetch(`http://127.0.0.1:${port}${path}`, {
+    let response = await fetch(`http://127.0.0.1:${port}${path}`, {
       method: body === undefined ? "GET" : "POST",
       headers,
       body: body === undefined ? undefined : JSON.stringify(body),
     });
+    if (authenticated && response.status === 401) {
+      const replacement = await reconnect(port);
+      if (!replacement) {
+        await chrome.storage.local.remove("bridgeToken");
+        return { paired: false };
+      }
+      headers.Authorization = `Bearer ${replacement}`;
+      response = await fetch(`http://127.0.0.1:${port}${path}`, {
+        method: body === undefined ? "GET" : "POST", headers,
+        body: body === undefined ? undefined : JSON.stringify(body),
+      });
+    }
     const data = await response.json();
     if (response.status === 401) return { paired: false };
     return { ...data, httpStatus: response.status, paired: authenticated ? true : undefined };
@@ -23,6 +66,7 @@ async function handle(message, sender) {
     const result = await request("/v1/pair", { code: message.code }, false);
     if (result.token) {
       await chrome.storage.local.set({ bridgeToken: result.token });
+      reconnectAfter = 0;
       const tabs = await chrome.tabs.query({ active: true, lastFocusedWindow: true });
       if (tabs[0]?.url?.startsWith("https://leetcode.cn/problems/")) {
         await chrome.tabs.reload(tabs[0].id);

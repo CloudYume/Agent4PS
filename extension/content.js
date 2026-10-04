@@ -7,12 +7,16 @@
       codeSnippets { langSlug code }
     }
   }`;
+  const QUESTION_STATUS = `query AgentProblemStatus($slug: String!) {
+    userStatus { isSignedIn }
+    question(titleSlug: $slug) { questionId questionFrontendId titleSlug status }
+  }`;
   const POLL_MS = 500;
   const HEARTBEAT_MS = 2000;
   let pollMs = POLL_MS;
-  const PROTOCOL_VERSION = 3;
-  const CAPABILITIES = ["command_phase", "execution_heartbeat", "submission_recovery", "write_authorization"];
-  const READ_ONLY_COMMANDS = new Set(["check_submission", "submission_baseline", "recover_submission"]);
+  const PROTOCOL_VERSION = 5;
+  const CAPABILITIES = ["command_phase", "execution_heartbeat", "submission_recovery", "write_authorization", "problem_status", "captured_submission_verification"];
+  const READ_ONLY_COMMANDS = new Set(["check_submission", "submission_baseline", "recover_submission", "problem_status", "verify_submission"]);
   const DOCUMENT_ID = crypto.randomUUID();
   const SUBMISSIONS = `query AgentSubmissions($slug: String!) {
     userStatus { isSignedIn }
@@ -65,15 +69,15 @@
     );
   }
 
-  function commandPhase(command, phase) {
+  function commandPhase(command, phase, details = {}) {
     return within(chrome.runtime.sendMessage({ type: "PHASE", phase: {
       command_id: command.id, kind: command.kind, slug: command.target_slug,
-      document_id: DOCUMENT_ID, phase,
+      document_id: DOCUMENT_ID, phase, ...details,
     } }), 4000, "browser phase acknowledgement timed out");
   }
 
-  function emitPhase(command, phase) {
-    commandPhase(command, phase).catch(() => {});
+  function emitPhase(command, phase, details = {}) {
+    commandPhase(command, phase, details).catch(() => {});
   }
 
   function slugFromUrl() {
@@ -85,6 +89,13 @@
     const text = (document.body?.innerText || "").slice(0, 3000).toLowerCase();
     return ["人机验证", "安全验证", "请输入验证码", "滑动验证", "verify you are human", "captcha"]
       .some((word) => text.includes(word)) || !!document.querySelector('iframe[src*="captcha"]');
+  }
+
+  function normalizedStatus(value) {
+    const rawStatus = String(value || "").toUpperCase();
+    return ["AC", "SOLVED", "ACCEPTED"].includes(rawStatus) ? "AC"
+      : ["NOTAC", "TRIED"].includes(rawStatus) ? "TRIED"
+      : rawStatus === "" ? "NOT_STARTED" : rawStatus;
   }
 
   async function loadProblem(slug) {
@@ -99,10 +110,6 @@
     if (body.errors?.length) throw new Error(body.errors[0].message);
     const question = body.data?.question;
     if (!question || question.titleSlug !== slug) throw new Error("Problem metadata unavailable");
-    const rawStatus = String(question.status || "").toUpperCase();
-    const status = ["AC", "SOLVED", "ACCEPTED"].includes(rawStatus) ? "AC"
-      : ["NOTAC", "TRIED"].includes(rawStatus) ? "TRIED"
-      : rawStatus === "" ? "NOT_STARTED" : rawStatus;
     const starter = question.codeSnippets?.find((item) => item.langSlug === "python3")?.code || "";
     return {
       number: Number(question.questionFrontendId),
@@ -115,7 +122,7 @@
       example_testcases: question.exampleTestcases || "",
       meta_data: question.metaData || "",
       enable_run_code: question.enableRunCode !== false,
-      status,
+      status: normalizedStatus(question.status),
       is_paid: !!question.isPaidOnly,
       logged_in: body.data?.userStatus?.isSignedIn === true,
       challenge: hasChallenge(),
@@ -254,6 +261,7 @@
           try {
             await verifySubmissionCode(value.submission_id, command.payload?.code_sha256);
           } catch (error) {
+            error.submission_id = value.submission_id;
             reject(error);
             return;
           }
@@ -287,7 +295,7 @@
     } else if (data.type === "issued" && action.codeMatched && detail.kind === action.kind && detail.submission_id) {
       if (action.kind === "submit" && !/^\d+$/.test(String(detail.submission_id))) return;
       action.submissionId = String(detail.submission_id);
-      emitPhase(action.command, "id_seen");
+      emitPhase(action.command, "id_seen", action.kind === "submit" ? { submission_id: action.submissionId } : {});
       if (action.kind === "submit") {
         action.resolve({ kind: "submit", submission_id: action.submissionId, code: action.expectedCode });
       }
@@ -313,7 +321,7 @@
     };
     try {
       if (!/^[a-f0-9]{24}$/.test(command.id || "") ||
-          !["navigate", "read_draft", "check_submission", "submission_baseline", "recover_submission", "run", "submit"].includes(command.kind) ||
+          !["navigate", "read_draft", "check_submission", "submission_baseline", "recover_submission", "verify_submission", "problem_status", "run", "submit"].includes(command.kind) ||
           command.document_id !== DOCUMENT_ID || !/^[a-z0-9-]+$/.test(command.target_slug || "")) {
         throw new Error("invalid browser command envelope; reload the extension and problem tab");
       }
@@ -356,12 +364,29 @@
         const id = String(command.payload?.submission_id || "");
         if (!/^\d+$/.test(id)) throw new Error("invalid submission ID");
         if (hasChallenge() || cachedProblem?.logged_in !== true) throw new Error("LeetCode login or verification is required");
-        const response = await fetch(`https://leetcode.cn/submissions/detail/${id}/check/`, {
-          credentials: "include", cache: "no-store",
-        });
-        if (!response.ok) throw new Error(`LeetCode check HTTP ${response.status}`);
-        const data = await response.json();
-        const pending = data.finished === false || ["PENDING", "STARTED", "PROCESSING"].includes(String(data.state || "").toUpperCase());
+        const controller = new AbortController();
+        const timer = setTimeout(() => controller.abort(), 20000);
+        let data;
+        try {
+          const response = await fetch(`https://leetcode.cn/submissions/detail/${id}/check/`, {
+            credentials: "include", cache: "no-store", signal: controller.signal,
+          });
+          if (!response.ok) throw new Error(`LeetCode check HTTP ${response.status}`);
+          data = await response.json();
+        } catch (error) {
+          if (controller.signal.aborted) throw new Error("submission check timed out");
+          throw error;
+        } finally {
+          clearTimeout(timer);
+        }
+        const pending = (data.finished === false ||
+          ["PENDING", "STARTED", "PROCESSING"].includes(String(data.state || "").toUpperCase()) ||
+          data.finished !== true && data.status_code == null);
+        let lastTestcase = inputText(data.last_testcase || data.input_formatted || data.input);
+        if (Number(data.status_code) === 14 && !data.expected_output && !singleAnswer(data.expected_code_answer) &&
+            lastTestcase.length > 6000) {
+          lastTestcase = `${lastTestcase.slice(0, 3000)}\n... (${lastTestcase.length - 6000} characters omitted) ...\n${lastTestcase.slice(-3000)}`;
+        }
         await sendResult({
           ...result, ok: true, kind: "submit", submission_id: id, pending,
           finished: data.finished ?? null, state: data.state || "",
@@ -372,7 +397,7 @@
           memory_percentile: data.memory_percentile ?? null,
           total_correct: data.total_correct ?? null, total_testcases: data.total_testcases ?? null,
           error: data.full_compile_error || data.full_runtime_error || data.runtime_error || data.compile_error || "",
-          last_testcase: inputText(data.last_testcase || data.input_formatted || data.input),
+          last_testcase: lastTestcase,
           expected_output: data.expected_output || singleAnswer(data.expected_code_answer),
           code_output: data.code_output || singleAnswer(data.code_answer),
           code_answers: data.code_answer ?? null,
@@ -388,6 +413,22 @@
         });
         return;
       }
+      if (command.kind === "problem_status") {
+        if (hasChallenge() || cachedProblem?.logged_in !== true) throw new Error("LeetCode login or verification is required");
+        const slug = command.payload?.question_slug;
+        if (!/^[a-z0-9-]+$/.test(slug || "")) throw new Error("invalid problem status request");
+        const data = await graphql(QUESTION_STATUS, "AgentProblemStatus", { slug });
+        if (data?.userStatus?.isSignedIn !== true || data?.question?.titleSlug !== slug) {
+          throw new Error("problem status could not be confirmed");
+        }
+        await sendResult({
+          ...result, ok: true, question_slug: slug,
+          question_id: String(data.question.questionId || ""),
+          number: Number(data.question.questionFrontendId),
+          status: normalizedStatus(data.question.status),
+        });
+        return;
+      }
       if (command.kind === "recover_submission") {
         if (hasChallenge() || cachedProblem?.logged_in !== true) throw new Error("LeetCode login or verification is required");
         const slug = command.payload?.question_slug;
@@ -400,6 +441,19 @@
         await sendResult({
           ...result, ok: true, submission_id: id,
         });
+        return;
+      }
+      if (command.kind === "verify_submission") {
+        if (hasChallenge() || cachedProblem?.logged_in !== true) throw new Error("LeetCode login or verification is required");
+        const slug = command.payload?.question_slug;
+        const id = String(command.payload?.submission_id || "");
+        const digest = command.payload?.code_sha256;
+        if (!/^[a-z0-9-]+$/.test(slug || "") || !/^\d+$/.test(id) ||
+            !/^[a-f0-9]{64}$/.test(digest || "")) throw new Error("invalid captured submission verification request");
+        const ids = await submissionIds(slug);
+        if (!ids.includes(id)) throw new Error("captured submission ID is not in this problem's recent submissions");
+        await verifySubmissionCode(id, digest);
+        await sendResult({ ...result, ok: true, verified: true });
         return;
       }
       await ensurePython3();
@@ -442,6 +496,9 @@
       Object.assign(result, outcome, { ok: true });
     } catch (error) {
       result.error = String(error?.message || error);
+      if (command.kind === "submit" && /^\d+$/.test(String(error?.submission_id || ""))) {
+        result.submission_id = String(error.submission_id);
+      }
     }
     await sendResult(result);
   }

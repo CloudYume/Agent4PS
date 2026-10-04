@@ -29,51 +29,19 @@ Agent4PS 是在 Windows 本机运行的 LeetCode 中国站 Python3 刷题 Agent�
 
 编排器以 `Problem`、`Candidate` 和 `CheckResult` 为阶段数据，按修复次数、模型请求预算与提交确认条件推进状态。浏览器扩展接触 `leetcode.cn` 页面；Python 进程通过只监听 `127.0.0.1` 的配对桥接服务下达动作，不接收浏览器 Cookie。
 
-```mermaid
-flowchart LR
-    site["LeetCode 题目与判题"] -->|"题面、模板、反馈"| perception["感知：题库与 Edge 扩展"]
-    perception --> controller["决策：Orchestrator"]
-    controller <-->|"生成、审阅、修复"| model["推理：ModelClient"]
-    controller <-->|"语法、接口与本地诊断"| local["本地校验"]
-    controller <-->|"候选与运行状态"| memory[("持久记忆：progress 与产物")]
-    controller -->|"写码、运行、提交、导航"| tools["执行：Edge 扩展"]
-    tools --> site
-    controller -.->|"达到失败门槛"| search["参考资料检索"]
-```
+<picture>
+  <source media="(max-width: 600px)" srcset="docs/diagrams/architecture-mobile.svg">
+  <img src="docs/diagrams/architecture.svg" alt="Agent4PS 系统边界：LeetCode 页面、Edge 扩展与本机 Python Agent">
+</picture>
 
 模型 API 会收到题目描述、官方模板、候选代码和必要的失败反馈；公开题解仅在达到配置的失败门槛后作为参考输入。桥接服务默认使用端口 `8765`。
 
 ### 单题决策循环
 
-```mermaid
-flowchart TD
-    start["活动题目 / 已保存断点"] --> select{"可做且尚未 AC？"}
-    select -- "否" --> next["记录跳过并进入下一题"]
-    select -- "是" --> statement["读取题面与 Python3 官方模板"]
-    statement --> candidate["生成或恢复候选代码"]
-    candidate --> local["语法、接口与可用本地用例检查"]
-    local -- "语法或接口错误" --> feedback["保存失败反馈"]
-    local -- "通过或用例结果不确定" --> review{"本次需要独立审阅？"}
-    review -- "是" --> modelReview["模型审阅"]
-    review -- "否" --> run["力扣站内运行"]
-    modelReview -- "拒绝" --> feedback
-    modelReview -- "通过" --> run
-    run -- "WA / 运行时或编译错误" --> feedback
-    run -- "通过" --> baseline["记录提交基线与代码哈希"]
-    baseline --> submit["点击提交一次"]
-    submit --> receipt{"提交 ID 与代码匹配？"}
-    receipt -- "无法确认" --> stop["停止并保留待确认状态"]
-    receipt -- "确认" --> judge["按提交 ID 查询判题"]
-    judge -- "WA / 其他失败" --> feedback
-    judge -- "结果无法确认" --> stop
-    judge -- "Accepted" --> advance["推进 progress 游标"]
-    advance --> next
-    feedback --> budget{"还有修复次数？"}
-    budget -- "是" --> repair["提取回归用例 / 调用修复模型"]
-    repair --> local
-    budget -- "否" --> reviewLater["记录 needs_review 并继续"]
-    reviewLater --> next
-```
+<picture>
+  <source media="(max-width: 600px)" srcset="docs/diagrams/problem-flow-mobile.svg">
+  <img src="docs/diagrams/problem-flow.svg" alt="单题处理流程：读取题目、生成候选、本地检查、站内运行、提交判题及三种结果">
+</picture>
 
 **感知。** 题面来自当前题的 GraphQL `translatedContent`（缺失时使用 `content`），仅解析题目 HTML；不会读取题解、评论、相关题目或页面页脚。模型同时收到 Python3 `codeSnippets` 中的官方提交模板。长题面优先保留开头的题意和末尾的约束。题面图片保留在原位置，配置视觉模型后会生成图意描述。
 

@@ -1,0 +1,38 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="960" height="252" viewBox="0 0 960 252" role="img" aria-labelledby="title description">
+  <title id="title">Agent4PS 系统边界</title>
+  <desc id="description">LeetCode 页面与 Edge 扩展交互。扩展通过本机配对桥接服务与 Python Agent 通信；Orchestrator 协调模型、本地校验和进度存储。</desc>
+  <defs>
+    <marker id="arrow" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+      <path d="M1 1L9 5L1 9" fill="none" stroke="#58717c" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
+    </marker>
+  </defs>
+  <rect x="1" y="1" width="958" height="250" rx="6" fill="#fbfcfd" stroke="#dce5e8"/>
+  <g font-family="Inter, Noto Sans CJK SC, Microsoft YaHei, sans-serif">
+    <text x="36" y="39" fill="#52646d" font-size="15" font-weight="700">站点</text>
+    <text x="356" y="39" fill="#52646d" font-size="15" font-weight="700">浏览器</text>
+    <text x="676" y="39" fill="#52646d" font-size="15" font-weight="700">本机进程</text>
+
+    <rect x="36" y="57" width="248" height="158" rx="6" fill="#ffffff" stroke="#cfdbe0"/>
+    <path d="M42 57H278" stroke="#c46b4b" stroke-width="4"/>
+    <text x="58" y="108" fill="#1e3039" font-size="23" font-weight="700">LeetCode</text>
+    <text x="58" y="149" fill="#435762" font-size="16">题面 · Python 模板</text>
+    <text x="58" y="178" fill="#435762" font-size="16">运行与正式判题</text>
+
+    <rect x="356" y="57" width="248" height="158" rx="6" fill="#ffffff" stroke="#c8dcd6"/>
+    <path d="M362 57H598" stroke="#168878" stroke-width="4"/>
+    <text x="378" y="108" fill="#1e3039" font-size="23" font-weight="700">Edge 扩展</text>
+    <text x="378" y="149" fill="#435762" font-size="16">读取当前题目页</text>
+    <text x="378" y="178" fill="#435762" font-size="16">写码 · 运行 · 提交</text>
+
+    <rect x="676" y="57" width="248" height="158" rx="6" fill="#ffffff" stroke="#cbd8e3"/>
+    <path d="M682 57H918" stroke="#426d9f" stroke-width="4"/>
+    <text x="698" y="108" fill="#1e3039" font-size="23" font-weight="700">Python Agent</text>
+    <text x="698" y="149" fill="#435762" font-size="16">Orchestrator 决策</text>
+    <text x="698" y="178" fill="#435762" font-size="15">模型 · 校验 · 进度存储</text>
+
+    <text x="320" y="114" text-anchor="middle" fill="#52646d" font-size="14">页面</text>
+    <path d="M292 146H348" fill="none" stroke="#58717c" stroke-width="2" marker-start="url(#arrow)" marker-end="url(#arrow)"/>
+    <text x="640" y="114" text-anchor="middle" fill="#52646d" font-size="14">本机桥接</text>
+    <path d="M612 146H668" fill="none" stroke="#58717c" stroke-width="2" marker-start="url(#arrow)" marker-end="url(#arrow)"/>
+  </g>
+</svg>

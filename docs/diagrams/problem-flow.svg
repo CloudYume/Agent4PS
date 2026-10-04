@@ -1,0 +1,71 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="960" height="396" viewBox="0 0 960 396" role="img" aria-labelledby="title description">
+  <title id="title">Agent4PS 单题处理流程</title>
+  <desc id="description">Agent 读取题面，生成或恢复候选，完成本地检查和站内运行，然后只提交一次并按提交 ID 查询判题。Accepted 推进游标，失败保存反馈并按预算修复，无法确认时保留断点。</desc>
+  <defs>
+    <marker id="arrow" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto">
+      <path d="M1 1L9 5L1 9" fill="none" stroke="#61747e" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
+    </marker>
+  </defs>
+  <rect x="1" y="1" width="958" height="394" rx="6" fill="#fbfcfd" stroke="#dce5e8"/>
+  <g font-family="Inter, Noto Sans CJK SC, Microsoft YaHei, sans-serif">
+    <text x="35" y="41" fill="#243942" font-size="20" font-weight="700">单题主流程</text>
+    <text x="925" y="40" text-anchor="end" fill="#5b6d76" font-size="14">以正式提交的判题结果为准</text>
+
+    <g fill="#ffffff" stroke="#cbd8dd">
+      <rect x="35" y="76" width="150" height="104" rx="6"/>
+      <rect x="220" y="76" width="150" height="104" rx="6"/>
+      <rect x="405" y="76" width="150" height="104" rx="6"/>
+      <rect x="590" y="76" width="150" height="104" rx="6"/>
+      <rect x="775" y="76" width="150" height="104" rx="6"/>
+    </g>
+    <g fill="#168878">
+      <rect x="41" y="76" width="138" height="4"/>
+      <rect x="226" y="76" width="138" height="4"/>
+      <rect x="411" y="76" width="138" height="4"/>
+      <rect x="596" y="76" width="138" height="4"/>
+      <rect x="781" y="76" width="138" height="4"/>
+    </g>
+    <g text-anchor="middle" fill="#20343e" font-size="20" font-weight="700">
+      <text x="110" y="120">读取题目</text>
+      <text x="295" y="120">生成候选</text>
+      <text x="480" y="120">本地检查</text>
+      <text x="665" y="120">站内运行</text>
+      <text x="850" y="120">正式提交</text>
+    </g>
+    <g text-anchor="middle" fill="#52646d" font-size="14">
+      <text x="110" y="151">题面 · 模板</text>
+      <text x="295" y="151">生成 / 恢复</text>
+      <text x="480" y="151">语法 · 接口</text>
+      <text x="665" y="151">站内用例反馈</text>
+      <text x="850" y="151">按 ID 查询判题</text>
+    </g>
+    <g fill="none" stroke="#61747e" stroke-width="2" marker-end="url(#arrow)">
+      <path d="M191 128H213"/>
+      <path d="M376 128H398"/>
+      <path d="M561 128H583"/>
+      <path d="M746 128H768"/>
+    </g>
+
+    <path d="M850 180V224H170" fill="none" stroke="#61747e" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+    <g fill="none" stroke="#61747e" stroke-width="2" marker-end="url(#arrow)">
+      <path d="M170 224V254"/>
+      <path d="M480 224V254"/>
+      <path d="M790 224V254"/>
+    </g>
+
+    <rect x="35" y="262" width="270" height="94" rx="6" fill="#f2faf6" stroke="#b7d9c7"/>
+    <rect x="345" y="262" width="270" height="94" rx="6" fill="#fff8ed" stroke="#e8d1a6"/>
+    <rect x="655" y="262" width="270" height="94" rx="6" fill="#fdf5f2" stroke="#e5c4b9"/>
+    <g text-anchor="middle" font-weight="700" font-size="20">
+      <text x="170" y="303" fill="#1f7650">Accepted</text>
+      <text x="480" y="303" fill="#9b661a">判题失败</text>
+      <text x="790" y="303" fill="#a44e3b">无法确认</text>
+    </g>
+    <g text-anchor="middle" fill="#40555e" font-size="15">
+      <text x="170" y="331">推进游标，进入下一题</text>
+      <text x="480" y="331">保存反馈，按预算修复</text>
+      <text x="790" y="331">停止并保留当前断点</text>
+    </g>
+    <text x="35" y="380" fill="#60717a" font-size="13">修复后重新检查；提交归属不明时，不自动重复提交。</text>
+  </g>
+</svg>

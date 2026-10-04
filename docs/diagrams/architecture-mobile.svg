@@ -1,0 +1,36 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="400" height="558" viewBox="0 0 400 558" role="img" aria-labelledby="title description">
+  <title id="title">Agent4PS 系统边界</title>
+  <desc id="description">LeetCode 页面与 Edge 扩展交互。扩展通过本机桥接服务与 Python Agent 通信；Agent 负责决策、模型调用、校验和进度存储。</desc>
+  <defs>
+    <marker id="arrow" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+      <path d="M1 1L9 5L1 9" fill="none" stroke="#58717c" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
+    </marker>
+  </defs>
+  <rect x="1" y="1" width="398" height="556" rx="6" fill="#fbfcfd" stroke="#dce5e8"/>
+  <g font-family="Inter, Noto Sans CJK SC, Microsoft YaHei, sans-serif">
+    <rect x="24" y="24" width="352" height="128" rx="6" fill="#ffffff" stroke="#cfdbe0"/>
+    <path d="M30 24H370" stroke="#c46b4b" stroke-width="4"/>
+    <text x="44" y="55" fill="#52646d" font-size="14" font-weight="700">站点</text>
+    <text x="44" y="89" fill="#1e3039" font-size="22" font-weight="700">LeetCode</text>
+    <text x="44" y="125" fill="#435762" font-size="16">题面 · Python 模板 · 正式判题</text>
+
+    <path d="M200 160V184" fill="none" stroke="#58717c" stroke-width="2" marker-start="url(#arrow)" marker-end="url(#arrow)"/>
+    <text x="220" y="177" fill="#52646d" font-size="13">页面</text>
+
+    <rect x="24" y="194" width="352" height="128" rx="6" fill="#ffffff" stroke="#c8dcd6"/>
+    <path d="M30 194H370" stroke="#168878" stroke-width="4"/>
+    <text x="44" y="225" fill="#52646d" font-size="14" font-weight="700">浏览器</text>
+    <text x="44" y="259" fill="#1e3039" font-size="22" font-weight="700">Edge 扩展</text>
+    <text x="44" y="295" fill="#435762" font-size="16">读取 · 写码 · 运行 · 提交</text>
+
+    <path d="M200 330V354" fill="none" stroke="#58717c" stroke-width="2" marker-start="url(#arrow)" marker-end="url(#arrow)"/>
+    <text x="220" y="347" fill="#52646d" font-size="13">本机桥接</text>
+
+    <rect x="24" y="364" width="352" height="170" rx="6" fill="#ffffff" stroke="#cbd8e3"/>
+    <path d="M30 364H370" stroke="#426d9f" stroke-width="4"/>
+    <text x="44" y="395" fill="#52646d" font-size="14" font-weight="700">本机进程</text>
+    <text x="44" y="429" fill="#1e3039" font-size="22" font-weight="700">Python Agent</text>
+    <text x="44" y="465" fill="#435762" font-size="16">Orchestrator 决策</text>
+    <text x="44" y="496" fill="#435762" font-size="16">模型 · 校验 · 进度存储</text>
+  </g>
+</svg>

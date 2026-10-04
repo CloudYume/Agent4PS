@@ -135,9 +135,18 @@ def test_edge_extension_writes_runs_and_correlates_submission(
                             submissions.insert(0, "42")
                         request.fulfill(json={} if lost_receipt or stray_terminal else {"submission_id": "42"})
                     elif "runcode_1/check" in url:
-                        request.fulfill(json={"submission_id": "runcode_1", "status_code": 10, "compare_result": "1,1", "status_msg": "Accepted"})
+                        request.fulfill(json={
+                            "submission_id": "runcode_1", "status_code": 11,
+                            "status_msg": "Wrong Answer", "input_formatted": "[2,7]\n9",
+                            "code_answer": [-1], "expected_code_answer": [[0, 1]],
+                        })
                     elif "/42/check" in url:
-                        request.fulfill(json={"submission_id": "42", "question_id": "1", "finished": True, "status_code": 10, "status_msg": "Accepted"})
+                        request.fulfill(json={
+                            "submission_id": "42", "question_id": "1", "finished": True,
+                            "status_code": 10, "status_msg": "Accepted",
+                            "input_formatted": "[2,7]\n9",
+                            "code_answer": [[0, 1]], "expected_code_answer": [[0, 1]],
+                        })
                     elif "/41/check" in url:
                         request.fulfill(json={"submission_id": "41", "question_id": "1", "finished": True, "status_code": 10, "status_msg": "Accepted"})
                     else:
@@ -184,10 +193,16 @@ def test_edge_extension_writes_runs_and_correlates_submission(
                         )
                         page.wait_for_timeout(2500)
                         assert bridge.current["seen_at"] > before_heartbeat
-                        assert _await_command(page, background_check)["status_code"] == 10
+                        checked = _await_command(page, background_check)
+                        assert checked["status_code"] == 10
+                        assert checked["last_testcase"] == "[2,7]\n9"
+                        assert checked["code_output"] == "[0,1]"
                     run_result = _await_command(page, run)
                     assert run_result["submission_id"] == "runcode_1"
                     assert run_result["code"].strip() == code.strip()
+                    assert run_result["last_testcase"] == "[2,7]\n9"
+                    assert run_result["code_output"] == "-1"
+                    assert run_result["expected_output"] == "[0,1]"
                     if check_heartbeat:
                         other_tab = context.new_page()
                         try:

@@ -1,12 +1,12 @@
 # Agent4PS
 
-Agent4PS 是在 Windows 本机运行的 LeetCode 中国站 Python3 刷题代理。Python 进程负责题目编排、模型调用、校验与进度记录；Edge 扩展操作当前活动的题目标签页。代理从活动题目或可恢复的保存进度开始，按算法题号继续处理。
+Agent4PS 是在 Windows 本机运行的 LeetCode 中国站 Python3 刷题 Agent。它从当前题目或保存的断点出发，读取题面与代码模板，生成候选解法，调用站内运行和判题，再根据反馈修复或推进到下一题。
 
-项目当前面向**个人本机运行**：需要已登录 `leetcode.cn` 的 Microsoft Edge、可用的 Chat Completions API，以及人工处理登录验证、无法确认的提交和站点接口变化。模型输出与站内判题结果均可能失败，程序以正式提交 ID 和力扣返回的 Accepted 作为自动完成依据。
+模型是解题组件，Agent 的控制逻辑在 Python 编排器中：它决定何时求解、审阅、运行、提交、修复、检索参考资料或停止，并把候选代码和反馈写入持久状态。只有正式提交 ID 对应的代码经力扣判为 Accepted，才算自动完成。项目面向**个人本机运行**，登录验证、无法确认的提交和站点接口变化仍需人工处理。
 
 ## 目录
 
-- [工作方式](#工作方式)
+- [Agent 架构](#agent-架构)
 - [快速开始](#快速开始)
 - [执行与恢复](#执行与恢复)
 - [配置参考](#配置参考)
@@ -15,51 +15,57 @@ Agent4PS 是在 Windows 本机运行的 LeetCode 中国站 Python3 刷题代理�
 - [安全与限制](#安全与限制)
 - [文档参考](#文档参考)
 
-## 工作方式
+## Agent 架构
 
-### 组件与数据流
+### 组成与职责
+
+| Agent 环节 | 实现 | 职责 |
+| --- | --- | --- |
+| 目标与决策 | `Orchestrator` | 按题号和保存状态选择下一步；控制审阅、修复、搜索、提交和停止的条件与预算 |
+| 感知 | `ProblemCatalog`、`ExtensionBrowser`、Edge 扩展 | 获取题目、Python3 模板、站内运行结果与正式判题反馈；有图时可调用视觉模型描述图片 |
+| 推理 | `ModelClient` | 根据题面生成代码；审阅修复候选，并按配置审阅首次候选；结合失败反馈修复代码，必要时切换备用模型 |
+| 工具与环境 | 本地校验、`BrowserBridge`、Edge 扩展 | 检查语法和提交接口；在活动题目页写入、运行、提交代码并导航 |
+| 记忆 | `ProgressStore`、`ArtifactStore` | 保存题号游标、候选、检查结果、参考资料和提交确认状态，供重启恢复 |
+
+编排器以 `Problem`、`Candidate` 和 `CheckResult` 为阶段数据，按修复次数、模型请求预算与提交确认条件推进状态。浏览器扩展接触 `leetcode.cn` 页面；Python 进程通过只监听 `127.0.0.1` 的配对桥接服务下达动作，不接收浏览器 Cookie。
 
 ```mermaid
 flowchart LR
-    subgraph local["Windows 本机"]
-        runner["Python CLI / 编排器"]
-        progress[("Output/progress.json")]
-        extension["Edge 扩展"]
-        page["活动的 leetcode.cn 题目页"]
-    end
-    model["Chat Completions API"]
-    catalog["LeetCode 算法题库 GraphQL"]
-
-    runner <-->|"127.0.0.1:8765 + 配对令牌"| extension
-    extension <--> page
-    runner <--> model
-    runner --> catalog
-    runner <--> progress
+    site["LeetCode 题目与判题"] -->|"题面、模板、反馈"| perception["感知：题库与 Edge 扩展"]
+    perception --> controller["决策：Orchestrator"]
+    controller <-->|"生成、审阅、修复"| model["推理：ModelClient"]
+    controller <-->|"语法、接口与本地诊断"| local["本地校验"]
+    controller <-->|"候选与运行状态"| memory[("持久记忆：progress 与产物")]
+    controller -->|"写码、运行、提交、导航"| tools["执行：Edge 扩展"]
+    tools --> site
+    controller -.->|"达到失败门槛"| search["参考资料检索"]
 ```
 
-扩展读取题目和站内判题信息，执行代码写入、运行、提交及导航；Python 进程不接收浏览器 Cookie。模型 API 接收题目描述、起始代码、候选解法和必要的失败反馈。桥接服务只监听 `127.0.0.1`，默认端口 `8765`。
+模型 API 会收到题目描述、官方模板、候选代码和必要的失败反馈；公开题解仅在达到配置的失败门槛后作为参考输入。桥接服务默认使用端口 `8765`。
 
-### 单题执行流程
+### 单题决策循环
 
 ```mermaid
 flowchart TD
     start["活动题目 / 已保存断点"] --> select{"可做且尚未 AC？"}
     select -- "否" --> next["记录跳过并进入下一题"]
-    select -- "是" --> candidate["生成或恢复候选代码"]
-    candidate --> local["语法与本地用例检查"]
-    local -- "失败" --> feedback["保存失败反馈"]
-    local -- "通过" --> review{"本次需要独立审阅？"}
+    select -- "是" --> statement["读取题面与 Python3 官方模板"]
+    statement --> candidate["生成或恢复候选代码"]
+    candidate --> local["语法、接口与可用本地用例检查"]
+    local -- "语法或接口错误" --> feedback["保存失败反馈"]
+    local -- "通过或用例结果不确定" --> review{"本次需要独立审阅？"}
     review -- "是" --> modelReview["模型审阅"]
     review -- "否" --> run["力扣站内运行"]
     modelReview -- "拒绝" --> feedback
     modelReview -- "通过" --> run
-    run -- "失败" --> feedback
+    run -- "WA / 运行时或编译错误" --> feedback
     run -- "通过" --> baseline["记录提交基线与代码哈希"]
     baseline --> submit["点击提交一次"]
     submit --> receipt{"提交 ID 与代码匹配？"}
     receipt -- "无法确认" --> stop["停止并保留待确认状态"]
     receipt -- "确认" --> judge["按提交 ID 查询判题"]
     judge -- "WA / 其他失败" --> feedback
+    judge -- "结果无法确认" --> stop
     judge -- "Accepted" --> advance["推进 progress 游标"]
     advance --> next
     feedback --> budget{"还有修复次数？"}
@@ -69,7 +75,11 @@ flowchart TD
     reviewLater --> next
 ```
 
-首次求解默认在同一次模型请求中完成边界与复杂度自检；修复候选会再接受独立审阅。站内 WA 时，程序将判题输入、实际输出和预期输出传给修复模型。可解析的 JSON 参数会成为本地回归用例；若新代码仍与失败代码逻辑相同，或无法通过保存的回归用例，程序会把拒绝原因发给备用模型，不会把该版本提交到力扣。两次验证失败后可搜索公开题解，搜索结果只作为参考文本。
+**感知。** 题面来自当前题的 GraphQL `translatedContent`（缺失时使用 `content`），仅解析题目 HTML；不会读取题解、评论、相关题目或页面页脚。模型同时收到 Python3 `codeSnippets` 中的官方提交模板。长题面优先保留开头的题意和末尾的约束。题面图片保留在原位置，配置视觉模型后会生成图意描述。
+
+**生成与验证。** 首次求解返回完整 Python 提交代码；修复候选接受独立审阅，首次候选是否审阅由配置决定。语法错误、与官方模板不符的类名或方法签名会阻止站内运行。模型自拟用例不作为判题依据；可解析的站内用例可供本地诊断，但本地输出分歧不会替代站内判题。
+
+**反馈与决策。** 站内 WA 的失败输入、实际输出和预期输出会进入修复请求；运行时或编译错误则传递站内错误文本。修复结果若与失败代码的 Python 逻辑相同，会尝试备用模型。反馈无法确认、提交归属不明或预算耗尽时，Agent 保存状态并停止或标记待审查，不会把一次“运行通过”当作 Accepted。
 
 ## 快速开始
 
@@ -138,14 +148,14 @@ Remove-Variable secret
 
 将 `output.save_artifacts` 改为 `true` 后，程序会恢复每题目录产物，包括候选版本、验证记录和题解摘要。当前题尚未完成时，`progress.json` 可能包含完整候选代码；备份和共享前应检查内容。
 
-本地校验会按 `ListNode` 类型标注或题目元数据，将链表样例的数组构造成节点，并将返回链表转回数组比较。重启时若保存的是本地校验失败，程序会先重验原候选；重验通过就继续站内运行。
+本地校验会按类型标注或题目元数据，将链表数组构造成 `ListNode`、二叉树层序数组构造成 `TreeNode`，并把返回的节点结构转回数组比较。力扣常见的 `Optional`、`List` 等类型标注也会在本地提供。与力扣预置定义完全一致的节点样板类会在运行前移除；其他同名类会被本地校验拦下，避免站内返回类型错误。手动判题、自定义节点容器、交互接口及无法用 JSON 样例可靠表示的类型会跳过本地用例，继续交给力扣站内运行验证。旧版进度中若保存了本地用例失败，重启时会去掉模型自拟用例并重验原候选。
 
 题面 HTML 中的图片会保留在文字里的原位置。设置 `api.vision_model` 后，程序会把图片 URL 交给视觉模型生成图意，再把描述提供给求解、审阅与修复模型。视觉请求计入 `workflow.max_model_calls`；图片无法读取时保留当前题号并停止。
 
 | 状态 | 含义 | 重启后的处理 |
 | --- | --- | --- |
 | `candidate_ready` / `run_verified` | 已保存候选，尚未确认正式提交 | 重新校验候选，继续当前题 |
-| `needs_repair` | 已保存失败反馈 | 本地失败先重验；其余失败带用例请求修复 |
+| `needs_repair` | 已保存失败反馈 | 旧本地用例失败先重验；站内失败带原始反馈请求修复 |
 | `submit_intent` / `submission_unconfirmed` | 已准备或发起提交，结果尚未确认 | 只读查询提交记录及判题，不再次点击提交 |
 | `accepted` | 本程序按提交 ID 确认 Accepted | 从下一题继续 |
 | `already_accepted` / `skipped` | 站内已有 AC，或题目缺失、付费、不可运行 | 从下一题继续 |
@@ -206,8 +216,8 @@ Remove-Variable secret
 | 协议版本不匹配 | 在 `edge://extensions` 重新加载 Agent4PS，再刷新题目标签；Python 运行器也需重启。 |
 | `LeetCode GraphQL HTTP 400` | 刷新题目页并核对登录状态；若仍出现，检查站点页面/API 变化及扩展日志。进度不会因此跳题。 |
 | 模型长时间无正文或超时 | 检查 endpoint、模型 ID、密钥和服务状态；可调整 API 超时。超时后当前题号仍保留。 |
-| `model response was not a JSON object` | 程序会尝试解析单一 JSON 对象或有效的 `Solution` Python 代码；无法识别时用备用模型重试一次，仍失败则保留题号。 |
-| WA 后模型重复原逻辑 | 失败输入、实际输出和预期输出会随修复请求发送；相同逻辑或未通过回归用例的代码会被拒绝，并尝试备用模型。仍失败则停止，保留 `needs_repair`。 |
+| `model response was not a JSON object` | 当前提示要求完整 Python 提交代码，同时兼容旧 JSON 回答；两种格式都无法识别时用备用模型重试一次，仍失败则保留题号。 |
+| WA 后模型重复原逻辑 | 先核对保存反馈来自站内运行或正式提交。站内失败输入、实际输出和预期输出会随修复请求发送；相同逻辑会再尝试备用模型。两次仍相同则停止并保留 `needs_repair`，不会把模型自拟用例当作站内 WA。 |
 | `submission_unconfirmed` | 先查看站内提交记录。重启会尝试只读恢复；仍不明确时，人工核对后使用 `resolve`，不要直接再次运行提交。 |
 | AC 后下一题加载超时 | 保持绑定标签活动并确认目标题页可打开；游标已在下一题，重启后会从该题继续。 |
 
@@ -221,9 +231,12 @@ Agent4PS/
 │   ├── __main__.py             # CLI、启动与提交恢复
 │   ├── bridge.py               # 127.0.0.1 桥接与配对
 │   ├── extension_browser.py    # 题目页、运行、提交与导航
-│   ├── orchestrator.py         # 单题流程及失败修复
-│   ├── model.py                # 模型 API 与回答校验
-│   └── progress.py             # 游标、快照与可选每题产物
+│   ├── orchestrator.py         # Agent 决策循环与状态迁移
+│   ├── model.py                # 求解、审阅、修复及视觉模型调用
+│   ├── local_check.py          # 提交接口与本地用例校验
+│   ├── judge_feedback.py       # 站内反馈与回归用例提取
+│   ├── search.py               # 失败后的参考资料检索
+│   └── progress.py             # 游标、候选快照与历史记录
 ├── Output/progress.json        # 运行后生成；当前持续更新的进度产物
 ├── Output/progress-history/    # 已完成题目的分片记录
 └── tests/                      # Python 与扩展测试

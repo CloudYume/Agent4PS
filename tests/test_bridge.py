@@ -373,6 +373,20 @@ def test_submission_detail_includes_performance_metrics():
     }) == "Accepted | runtime=7 ms | memory=19.20 MB | runtime percentile=29.54% | memory percentile=36.48%"
 
 
+def test_statement_keeps_examples_and_constraints_without_page_footer():
+    statement, images = _statement_with_images(
+        "<p>Find all shortest paths.</p>"
+        "<p>Example 1: input a, output b.</p>"
+        "<p>Constraints: words are unique.</p>"
+        "<footer>Related Topics and comments</footer><script>tracking()</script>",
+        "https://leetcode.cn/problems/word-ladder-ii/",
+    )
+    assert statement.index("Find all") < statement.index("Example 1") < statement.index("Constraints")
+    assert "Related Topics" not in statement
+    assert "tracking" not in statement
+    assert not images
+
+
 def test_failed_submission_keeps_raw_judge_input_actual_and_expected():
     class FakeBridge:
         def wait_for_page(self, timeout, require_active=True):
@@ -388,6 +402,25 @@ def test_failed_submission_keeps_raw_judge_input_actual_and_expected():
     result = ExtensionBrowser(FakeBridge(), None).check_submission(SubmissionReceipt("42", "hash"))
     assert not result.passed
     assert result.judge_feedback == JudgeFeedback("[1,2]\n3", "-1", "0")
+
+
+def test_runtime_error_detail_keeps_final_exception_after_long_traceback():
+    detail = ExtensionBrowser._detail({
+        "status_msg": "Runtime Error",
+        "error": "Traceback\n" + "helper frame\n" * 160
+                 + "TypeError: custom TreeNode is not valid for expected TreeNode",
+    })
+    assert "Traceback" in detail
+    assert "TypeError: custom TreeNode" in detail
+
+
+def test_multiple_judge_outputs_are_context_not_a_false_regression_case():
+    result = {
+        "status_msg": "Wrong Answer", "last_testcase": "[1,2]",
+        "code_answers": ["1", "2"], "expected_code_answers": ["1", "3"],
+    }
+    assert "actual outputs=[\"1\", \"2\"]" in ExtensionBrowser._detail(result)
+    assert ExtensionBrowser._judge_feedback(result) == JudgeFeedback("[1,2]", "", "")
 
 
 def test_submission_check_waits_for_terminal_result_and_matches_problem(monkeypatch):

@@ -7,7 +7,7 @@ import httpx
 import pytest
 
 import leetcode_agent.model as model_module
-from leetcode_agent.model import ModelClient
+from leetcode_agent.model import ModelClient, _model_statement
 from leetcode_agent.settings import load_settings
 from leetcode_agent.types import Candidate, ModelUnavailable, Problem, ProblemImage, ProblemRef, Reference, SampleCase
 
@@ -32,6 +32,58 @@ def test_vision_model_describes_problem_image_for_text_solver(monkeypatch):
     }
     assert "Image 1: 1,2,3 becomes 3,1,2." in prepared.visual_notes
     assert prepared.statement == problem.statement
+
+
+def test_solve_uses_full_statement_and_official_python_template(monkeypatch):
+    settings = load_settings(Path(__file__).resolve().parents[1] / "config.yaml")
+    client = ModelClient(settings.api, 2)
+    captured = []
+    code = "class Solution:\n    def findLadders(self, beginWord, endWord, wordList):\n        return []\n"
+    problem = Problem(
+        ProblemRef(126, "Word Ladder II", "word-ladder-ii", "https://leetcode.cn/problems/word-ladder-ii/"),
+        "Description.\nExample 1: hit to cog.\nConstraints: wordList is unique.", code,
+    )
+    monkeypatch.setattr(client, "_validated_chat", lambda system, user, parse, **kwargs:
+                        captured.append((system, user, kwargs)) or parse(code))
+    assert client.solve(problem).tests == []
+    system, user, options = captured[0]
+    assert "Return only complete Python submission code" in system
+    assert "Example 1: hit to cog" in user
+    assert "Constraints: wordList is unique" in user
+    assert f"Python 3 submission template (required interface):\n{code}" in user
+    assert "Python 3 submission template above" in options["retry_instruction"]
+
+
+def test_long_statement_keeps_final_constraints():
+    source = "Description and example.\n" + "x" * 20000 + "\nConstraints: wordList has unique words."
+    bounded = _model_statement(source, 14000)
+    assert len(bounded) <= 14000
+    assert bounded.startswith("Description and example.")
+    assert bounded.endswith("Constraints: wordList has unique words.")
+    assert "omitted" in bounded
+
+
+def test_code_only_design_submission_is_accepted():
+    code = "class LRUCache:\n    def __init__(self, capacity):\n        self.capacity = capacity\n    def get(self, key):\n        return -1\n"
+    candidate = ModelClient._candidate(code)
+    assert candidate.code == code.strip()
+    assert candidate.tests == []
+
+
+def test_design_problem_format_retry_keeps_official_class(monkeypatch):
+    settings = load_settings(Path(__file__).resolve().parents[1] / "config.yaml")
+    client = ModelClient(settings.api, 2)
+    code = "class LRUCache:\n    def __init__(self, capacity):\n        self.capacity = capacity\n    def get(self, key):\n        return -1\n"
+    problem = Problem(
+        ProblemRef(146, "LRU Cache", "lru-cache", "https://leetcode.cn/problems/lru-cache/"),
+        "Design an LRU cache.", code,
+    )
+    captured = []
+    monkeypatch.setattr(client, "_validated_chat", lambda system, user, parse, **kwargs:
+                        captured.append((user, kwargs["retry_instruction"])) or parse(code))
+    assert client.solve(problem).code == code.strip()
+    assert code in captured[0][0]
+    assert "class Solution" not in captured[0][1]
 
 
 def test_model_request_uses_configured_endpoint_and_model(monkeypatch):
@@ -423,11 +475,27 @@ def test_repair_prompt_includes_complete_labeled_judge_feedback(monkeypatch):
                           "## Description\nrepeated problem statement\n## Solutions\nUse backtracking")
     assert client.repair(problem, candidate, feedback, [reference]) is candidate
     system, user = captured[0]
-    assert "regression case" in system
+    assert "site-reported failing inputs" in system
     assert feedback in user
     assert '"args": [["."]], "expected": [["1"]]' in user
     assert "## Solutions\nUse backtracking" in user
     assert "repeated problem statement" not in user
+
+
+def test_runtime_repair_prompt_targets_judge_type_mismatch(monkeypatch):
+    settings = load_settings(Path(__file__).resolve().parents[1] / "config.yaml")
+    client = ModelClient(settings.api, 2)
+    captured = []
+    candidate = Candidate("class Solution: pass", "summary", "approach", "O(1)", "O(1)")
+    problem = Problem(ProblemRef(106, "Build Tree", "build-tree", "https://leetcode.cn/problems/build-tree/"),
+                      "Build a tree", "class Solution: pass")
+    monkeypatch.setattr(client, "_validated_chat", lambda system, user, parse, **kwargs: captured.append(
+        (system, kwargs["retry_instruction"])) or candidate)
+    client.repair(problem, candidate, "Runtime Error: expected return type TreeNode", [])
+    system, retry = captured[0]
+    assert "Never redefine LeetCode's ListNode or TreeNode" in system
+    assert "judge type mismatch" in retry
+    assert "Change the code logic" not in retry
 
 
 def test_repair_retries_unchanged_python_logic(monkeypatch):
@@ -475,7 +543,7 @@ def test_repair_rejects_twice_unchanged_python_logic(monkeypatch):
     assert calls == [None, settings.api.fallback_model]
 
 
-def test_repair_retries_changed_code_that_still_fails_saved_case(monkeypatch):
+def test_repair_leaves_output_disagreement_for_site_to_verify(monkeypatch):
     settings = load_settings(Path(__file__).resolve().parents[1] / "config.yaml")
     client = ModelClient(settings.api, 3)
     failed = Candidate(
@@ -498,9 +566,9 @@ def test_repair_retries_changed_code_that_still_fails_saved_case(monkeypatch):
                       "Return 2", "class Solution: pass")
     repaired = client.repair(problem, failed, "expected 2, got 0", [])
 
-    assert "return 2" in repaired.code
-    assert "repair failed saved regression cases" in prompts[1][0]
-    assert prompts[1][1] == settings.api.fallback_model
+    assert "return 1" in repaired.code
+    assert len(prompts) == 1
+    assert prompts[0][1] is None
 
 
 def test_model_401_is_not_reported_as_success(monkeypatch):

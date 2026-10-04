@@ -133,7 +133,7 @@ def test_first_attempt_skips_remote_review_in_fast_mode(tmp_path):
     assert model.reviews == 0
 
 
-def test_code_only_candidate_receives_review_before_browser_run(tmp_path):
+def test_code_only_candidate_follows_configured_review_mode(tmp_path):
     class CountingModel(FakeModel):
         def __init__(self):
             super().__init__()
@@ -152,7 +152,115 @@ def test_code_only_candidate_receives_review_before_browser_run(tmp_path):
         model, FakeSearch(),
     )
     agent.run_one()
-    assert model.reviews == 1
+    assert model.reviews == 0
+
+
+def test_model_generated_wrong_case_does_not_block_site_run(tmp_path):
+    problem = Problem(
+        ProblemRef(126, "Word Ladder II", "word-ladder-ii", "https://leetcode.cn/problems/word-ladder-ii/"),
+        "Return all shortest transformations.",
+        "class Solution:\n    def findLadders(self, beginWord, endWord, wordList):\n        pass\n",
+    )
+    original = Candidate(
+        "class Solution:\n"
+        "    def findLadders(self, beginWord, endWord, wordList):\n"
+        "        return [[beginWord, endWord]]\n",
+        "summary", "approach", "O(n)", "O(1)",
+        [SampleCase(args=["a", "c", ["b", "c"]], expected=[["a", "b", "c"]])],
+    )
+
+    class Browser(FakeBrowser):
+        def find_problem(self, number):
+            return problem.ref if number == 126 else None
+
+        def open_problem(self, ref):
+            return problem
+
+        def run_code(self, code):
+            assert "findLadders" in code
+            return super().run_code(code)
+
+    class Model(FakeModel):
+        def solve(self, current):
+            return original
+
+    browser = Browser([CheckResult(True, "run passed")], [CheckResult(True, "accepted")])
+    model = Model()
+    agent, progress = make_agent(tmp_path, browser, model, FakeSearch(), save_artifacts=False)
+    agent.local_check = check_candidate
+    progress.anchor(126)
+    assert agent.run_one()["status"] == "accepted"
+    assert model.repairs == 0
+    assert progress.load()["next_id"] == 127
+
+
+def test_saved_wrong_model_case_restarts_at_site_run(tmp_path):
+    problem = Problem(
+        ProblemRef(126, "Word Ladder II", "word-ladder-ii", "https://leetcode.cn/problems/word-ladder-ii/"),
+        "Return all shortest transformations.",
+        "class Solution:\n    def findLadders(self, beginWord, endWord, wordList):\n        pass\n",
+    )
+    original = Candidate(
+        "class Solution:\n"
+        "    def findLadders(self, beginWord, endWord, wordList):\n"
+        "        return [[beginWord, endWord]]\n",
+        "summary", "approach", "O(n)", "O(1)",
+        [SampleCase(args=["a", "c", ["b", "c"]], expected=[["a", "b", "c"]])],
+    )
+
+    class Browser(FakeBrowser):
+        def find_problem(self, number):
+            return problem.ref if number == 126 else None
+
+        def open_problem(self, ref):
+            return problem
+
+    browser = Browser([CheckResult(True, "run passed")], [CheckResult(True, "accepted")])
+    model = FakeModel()
+    agent, progress = make_agent(tmp_path, browser, model, FakeSearch(), save_artifacts=False)
+    agent.local_check = check_candidate
+    progress.anchor(126)
+    agent.artifacts.save(problem, original, "needs_repair", [
+        CheckResult(False, "local cases: case 1: expected [['a', 'b', 'c']], got [['a', 'c']]")
+    ], [], 1)
+    progress.mark_current(126, "needs_repair", slug=problem.ref.slug, attempts=1,
+                          code_sha256=_digest(original.code), snapshot=agent.artifacts.snapshot,
+                          last_error="local cases: model-generated case disagreed", validation_failures=1)
+    assert agent.run_one()["status"] == "accepted"
+    assert model.repairs == 0
+    assert progress.load()["next_id"] == 127
+
+
+def test_site_regression_mismatch_does_not_block_site_verification(tmp_path):
+    problem = Problem(
+        REF, "Return an order accepted by the site.",
+        "class Solution:\n    def order(self, nums: list[int]) -> list[int]:\n        pass\n",
+        meta_data='{"params": [{"name": "nums", "type": "integer[]"}]}',
+    )
+    original = Candidate(
+        "class Solution:\n    def order(self, nums: list[int]) -> list[int]:\n"
+        "        return nums[::-1]\n",
+        "summary", "approach", "O(n)", "O(n)",
+    )
+    feedback = JudgeFeedback("[1,2]", "[2,1]", "[1,2]")
+
+    class Browser(FakeBrowser):
+        def open_problem(self, ref):
+            return problem
+
+    browser = Browser([CheckResult(True, "site accepts output")], [CheckResult(True, "accepted")])
+    model = FakeModel()
+    agent, progress = make_agent(tmp_path, browser, model, FakeSearch())
+    agent.local_check = check_candidate
+    folder = agent.artifacts.save(problem, original, "candidate_ready", [
+        CheckResult(False, "earlier Wrong Answer", feedback)
+    ], [], 1)
+    progress.anchor(2)
+    progress.mark_current(2, "candidate_ready", slug=REF.slug, attempts=1,
+                          folder=str(folder), code_sha256=_digest(original.code))
+    assert agent.run_one()["status"] == "accepted"
+    assert browser.submit_calls == 1
+    assert model.repairs == 0
 
 
 def test_saved_local_failure_rechecks_before_requesting_repair(tmp_path):
@@ -182,6 +290,55 @@ def test_saved_local_failure_rechecks_before_requesting_repair(tmp_path):
     assert model.repairs == 0
     assert model.preparations == 0
     assert browser.submit_calls == 1
+
+
+def test_saved_platform_tree_class_is_normalized_and_rerun_without_model_repair(tmp_path):
+    ref = ProblemRef(106, "Build Tree", "construct-binary-tree-from-inorder-and-postorder-traversal",
+                     "https://leetcode.cn/problems/construct-binary-tree-from-inorder-and-postorder-traversal/")
+    problem = Problem(ref, "Build a tree", "# class TreeNode:\nclass Solution: pass",
+                      meta_data='{"return": {"type": "TreeNode"}}')
+    original = Candidate(
+        "class TreeNode:\n"
+        "    def __init__(self, val=0, left=None, right=None):\n"
+        "        self.val = val\n"
+        "        self.left = left\n"
+        "        self.right = right\n\n"
+        "class Solution:\n"
+        "    def buildTree(self, inorder: list[int], postorder: list[int]) -> TreeNode | None:\n"
+        "        return TreeNode(postorder[-1]) if postorder else None\n",
+        "summary", "approach", "O(n)", "O(1)",
+        [SampleCase(args=[[1], [1]], expected=[1])],
+    )
+
+    class Browser(FakeBrowser):
+        def find_problem(self, number):
+            return ref if number == 106 else None
+
+        def open_problem(self, current):
+            assert current == ref
+            return problem
+
+        def run_code(self, code):
+            assert "class TreeNode:" not in code
+            return super().run_code(code)
+
+    browser = Browser([CheckResult(True, "run passed")], [CheckResult(True, "accepted")])
+    model = FakeModel()
+    agent, progress = make_agent(tmp_path, browser, model, FakeSearch(), save_artifacts=False)
+    agent.local_check = check_candidate
+    progress.anchor(106)
+    agent.artifacts.save(problem, original, "needs_repair", [
+        CheckResult(True, "local cases passed"),
+        CheckResult(False, "站内运行: Runtime Error | TypeError: custom TreeNode is not valid value "
+                           "for the expected return type TreeNode"),
+    ], [], 1)
+    progress.mark_current(106, "needs_repair", slug=ref.slug, attempts=1,
+                          code_sha256=_digest(original.code), snapshot=agent.artifacts.snapshot,
+                          last_error="TreeNode return type mismatch", validation_failures=1)
+
+    assert agent.run_one()["status"] == "accepted"
+    assert model.repairs == 0
+    assert progress.load()["next_id"] == 107
 
 
 def test_failed_local_case_repairs_before_remote_review_or_browser_run(tmp_path):

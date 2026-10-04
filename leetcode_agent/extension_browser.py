@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import ipaddress
+import json
 import time
 from collections.abc import Callable
 from html import unescape
@@ -16,6 +17,8 @@ from .types import CheckResult, JudgeFeedback, Problem, ProblemImage, ProblemRef
 
 def _statement_with_images(content: str, base_url: str) -> tuple[str, tuple[ProblemImage, ...]]:
     soup = BeautifulSoup(content, "html.parser")
+    for tag in soup.find_all(("script", "style", "nav", "footer", "button")):
+        tag.decompose()
     images = []
     for tag in soup.find_all("img"):
         source = tag.get("data-src") or tag.get("src") or ""
@@ -293,6 +296,13 @@ class ExtensionBrowser:
 
     @staticmethod
     def _detail(result: dict) -> str:
+        def excerpt(value: object, limit: int = 800) -> str:
+            text = str(value)
+            if len(text) <= limit:
+                return text
+            head = limit // 2
+            return text[:head] + " ... " + text[-head:]
+
         fields = [result.get("status_msg")]
         for label, key in (("runtime", "status_runtime"), ("memory", "status_memory")):
             if result.get(key):
@@ -303,7 +313,12 @@ class ExtensionBrowser:
         if isinstance(result.get("total_correct"), int) and isinstance(result.get("total_testcases"), int):
             fields.append(f"cases={result['total_correct']}/{result['total_testcases']}")
         fields.extend((result.get("error"), result.get("last_testcase"), result.get("expected_output"), result.get("code_output")))
-        return " | ".join(str(value)[:500] for value in fields if value)[:1200] or f"status_code={result.get('status_code')}"
+        for label, key, direct in (("actual outputs", "code_answers", "code_output"),
+                                   ("expected outputs", "expected_code_answers", "expected_output")):
+            value = result.get(key)
+            if not result.get(direct) and value:
+                fields.append(f"{label}={json.dumps(value, ensure_ascii=False)}")
+        return " | ".join(excerpt(value) for value in fields if value)[:2400] or f"status_code={result.get('status_code')}"
 
     @staticmethod
     def _validate_result(result: dict, kind: str, code: str) -> None:

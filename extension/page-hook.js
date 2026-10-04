@@ -85,10 +85,12 @@
         runtime_percentile: data.runtime_percentile ?? null,
         memory_percentile: data.memory_percentile ?? null,
         compare_result: data.compare_result ?? null,
-        error: data.full_compile_error || data.runtime_error || data.compile_error || "",
-        last_testcase: data.last_testcase || "",
-        expected_output: data.expected_output || "",
-        code_output: data.code_output || "",
+        error: data.full_compile_error || data.full_runtime_error || data.runtime_error || data.compile_error || "",
+        last_testcase: inputText(data.last_testcase || data.input_formatted || data.input),
+        expected_output: data.expected_output || singleAnswer(data.expected_code_answer),
+        code_output: data.code_output || singleAnswer(data.code_answer),
+        code_answers: data.code_answer ?? null,
+        expected_code_answers: data.expected_code_answer ?? null,
       });
       return;
     }
@@ -96,6 +98,16 @@
       const id = findId(data);
       if (id) post("issued", { kind, submission_id: id });
     }
+  }
+
+  function singleAnswer(value) {
+    if (typeof value === "string") return value;
+    if (!Array.isArray(value) || value.length !== 1) return "";
+    return typeof value[0] === "string" ? value[0] : JSON.stringify(value[0]);
+  }
+
+  function inputText(value) {
+    return typeof value === "string" ? value : value == null ? "" : JSON.stringify(value);
   }
 
   const originalFetch = window.fetch;

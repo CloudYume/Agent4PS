@@ -1,9 +1,10 @@
 from __future__ import annotations
 
 from collections.abc import Callable
+from dataclasses import replace
 
 from .judge_feedback import format_failure, with_judge_cases
-from .local_check import check_candidate
+from .local_check import check_candidate, normalize_platform_node_classes
 from .progress import ArtifactStore, ProgressStore, _digest, record_ref
 from .settings import Settings
 from .types import Candidate, CheckResult, Problem, ProgressEvent, Reference, SiteUnavailable
@@ -125,6 +126,13 @@ class Orchestrator:
             checks, references = self.artifacts.load_attempt_context(saved)
             validation_failures = saved.get("validation_failures", 0)
             searched = saved.get("searched", False)
+        # Model-generated expected outputs are suggestions; only the site judge can confirm them.
+        candidate = replace(candidate, tests=[])
+        normalized = normalize_platform_node_classes(candidate, problem)
+        if normalized.code != candidate.code and saved.get("status") == "needs_repair":
+            saved = {**saved, "status": "candidate_ready"}
+            validation_failures = max(0, validation_failures - 1)
+        candidate = normalized
         if saved.get("status") == "needs_repair":
             feedback = saved.get("last_error")
             last_failed = next((check for check in reversed(checks) if not check.passed), None)
@@ -156,6 +164,8 @@ class Orchestrator:
                 first_attempt += 1
         for repair_number in range(first_attempt - 1, self.settings.workflow.max_repairs + 1):
             attempt = repair_number + 1
+            candidate = replace(candidate, tests=[])
+            candidate = normalize_platform_node_classes(candidate, problem)
             candidate = with_judge_cases(problem, candidate, checks)
             folder = self.artifacts.save(problem, candidate, "candidate_ready", checks, references, attempt)
             self._mark_current(number, "candidate_ready", **record_ref(problem.ref),
@@ -163,16 +173,23 @@ class Orchestrator:
                                        question_id=problem.site_question_id)
             self._report(problem.ref.number, "local", f"Problem {problem.ref.number}, attempt {attempt}: checking local cases", attempt)
             result = self._check_local(candidate, problem)
-            checks.append(result)
-            needs_review = (self.settings.workflow.review_mode == "always" or repair_number > 0
-                            or (candidate.time_complexity == "未评估"
-                                and candidate.space_complexity == "未评估"))
-            if result.passed and needs_review:
+            local_advisory = not result.passed and result.detail.startswith((
+                "local cases:", "local cases exceeded", "local process failed:",
+            ))
+            if local_advisory:
+                checks.append(CheckResult(True, f"local cases inconclusive; site will verify: {result.detail}"))
+                self._report(problem.ref.number, "local",
+                             f"Problem {problem.ref.number}: local case disagreed; checking on LeetCode", attempt)
+            else:
+                checks.append(result)
+            local_passed = result.passed or local_advisory
+            needs_review = self.settings.workflow.review_mode == "always" or repair_number > 0
+            if local_passed and needs_review:
                 self._report(problem.ref.number, "review", f"Problem {problem.ref.number}, attempt {attempt}: reviewing correctness and complexity", attempt)
                 prepare_for_model()
                 approved, issues = self.model.review(problem, candidate)
             else:
-                approved, issues = result.passed, []
+                approved, issues = local_passed, []
             if approved:
                 self._report(problem.ref.number, "run", f"Problem {problem.ref.number}, attempt {attempt}: running on LeetCode", attempt)
                 result = self.browser.run_code(candidate.code)
@@ -247,12 +264,12 @@ class Orchestrator:
                         self._report(number, "navigate", f"Problem {number}: Accepted; navigating to problem {number + 1}", attempt)
                         return {"number": problem.ref.number, "status": "accepted",
                                 "folder": str(folder) if self.artifacts.enabled else None}
-            if not result.passed:
-                feedback = format_failure(result)
-                validation_failures += 1
-            elif not approved:
+            if not approved and local_passed:
                 feedback = "review rejected: " + "; ".join(issues or ["unspecified issue"])
                 checks.append(CheckResult(False, feedback))
+            elif not result.passed:
+                feedback = format_failure(result)
+                validation_failures += 1
             self.artifacts.save(problem, candidate, "needs_repair", checks, references, attempt)
             self._mark_current(number, "needs_repair", **record_ref(problem.ref),
                                attempts=attempt, folder=str(folder), code_sha256=_digest(candidate.code),

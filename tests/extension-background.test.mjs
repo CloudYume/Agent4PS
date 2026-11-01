@@ -5,7 +5,7 @@ import test from 'node:test';
 import vm from 'node:vm';
 
 test('code write requires the active tab, live run command, and visible matching problem', async () => {
-  const source = fs.readFileSync(path.resolve('extension/background.js'), 'utf8');
+  const source = fs.readFileSync(path.resolve('browser-extension/background.js'), 'utf8');
   let listener;
   let activeId = 8;
   let commandLive = true;
@@ -73,7 +73,7 @@ test('code write requires the active tab, live run command, and visible matching
 });
 
 test('background restores a missing or stale token without a pairing code', async () => {
-  const source = fs.readFileSync(path.resolve('extension/background.js'), 'utf8');
+  const source = fs.readFileSync(path.resolve('browser-extension/background.js'), 'utf8');
   let listener;
   const stored = { bridgePort: 8765 };
   const requests = [];

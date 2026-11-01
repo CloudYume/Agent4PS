@@ -85,7 +85,7 @@ def test_edge_extension_writes_runs_and_correlates_submission(
     server = make_server("127.0.0.1", 0, bridge)
     server_thread = Thread(target=server.serve_forever, daemon=True)
     server_thread.start()
-    extension = str((Path(__file__).resolve().parents[1] / "extension").resolve())
+    extension = str((Path(__file__).resolve().parents[1] / "browser-extension").resolve())
     try:
         with playwright.sync_playwright() as engine:
             context = engine.chromium.launch_persistent_context(

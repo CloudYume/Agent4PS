@@ -36,7 +36,7 @@ const context = {
   XMLHttpRequest: FakeXHR,
   CustomEvent: FakeCustomEvent,
 };
-vm.runInNewContext(readFileSync(new URL("../extension/page-hook.js", import.meta.url), "utf8"), context);
+vm.runInNewContext(readFileSync(new URL("../browser-extension/page-hook.js", import.meta.url), "utf8"), context);
 
 await window.fetch("/problems/two-sum/submit/", {
   method: "POST",

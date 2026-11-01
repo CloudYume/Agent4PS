@@ -350,7 +350,7 @@ def main(argv: list[str] | None = None) -> int:
         if args.command == "doctor":
             print(f"Python: {sys.version.split()[0]}")
             print(f"Edge: {'found' if _edge_installed() else 'missing'}")
-            print(f"Extension: {'found' if (root / 'extension' / 'manifest.json').is_file() else 'missing'}")
+            print(f"Extension: {'found' if (root / 'browser-extension' / 'manifest.json').is_file() else 'missing'}")
             ref = ProblemCatalog(str(settings.leetcode.base_url)).find(1)
             if not ref:
                 raise AgentError("LeetCode algorithm catalog is unavailable")
